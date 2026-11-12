@@ -25,6 +25,7 @@ use crate::formats::{self, ext_of, Adapter, Kind, Op};
 use crate::fsx::{read, rel, walk, write};
 use crate::paths;
 use crate::rules::{self, Route};
+use crate::ui;
 
 pub const RULES_TEMPLATE: &str = "\
 # sync.rules -- 本机专属的配置项
@@ -215,14 +216,11 @@ fn warn_unmanaged(repo: &Repo) {
     }
     let rules = format!("{}/{}", repo.name, adopt::NAME);
     for path in list.iter().take(WARN_LIMIT) {
-        eprintln!(
-            "[sync] warning: {path} looks like config but no adopt.rules line claims it \
-             -> add \"{path}\" to {rules} to sync it"
-        );
+        warn!("{path} looks like config but no adopt.rules line claims it -> add \"{path}\" to {rules} to sync it");
     }
     if list.len() > WARN_LIMIT {
-        eprintln!(
-            "[sync] warning: ... and {} more unclaimed config file(s) in {}",
+        warn!(
+            "... and {} more unclaimed config file(s) in {}",
             list.len() - WARN_LIMIT,
             repo.source.display()
         );
@@ -452,24 +450,35 @@ fn describe(op: &Op) -> String {
 }
 
 fn report(p: &Plan) {
+    let mut rows: Vec<(&'static str, String, String)> = Vec::new();
     for op in &p.shared {
-        println!("            base : {:<30} {}", op.path, describe(op));
+        rows.push(("base", op.path.clone(), describe(op)));
     }
-    for op in p
-        .local
-        .iter()
-        .filter(|op| !p.pins.iter().any(|pin| pin.path == op.path))
-    {
-        println!("            local: {:<30} {}", op.path, describe(op));
+    let pinned: HashSet<&str> = p.pins.iter().map(|pin| pin.path.as_str()).collect();
+    for op in p.local.iter().filter(|op| !pinned.contains(op.path.as_str())) {
+        rows.push(("local", op.path.clone(), describe(op)));
     }
     for op in &p.pins {
-        println!("            pin  : {:<30} {}", op.path, describe(op));
+        rows.push(("pin", op.path.clone(), describe(op)));
     }
     for path in &p.stale {
-        println!("            prune: {path:<30} overlay dropped it (not machine-owned)");
+        rows.push(("prune", path.clone(), "overlay dropped it (not machine-owned)".to_string()));
     }
     for path in &p.veto {
-        println!("            keep : {path:<30} local only (sync.rules '!')");
+        rows.push(("keep", path.clone(), "local only (sync.rules '!')".to_string()));
+    }
+    let width = ui::width(rows.iter().map(|(_, cell, _)| cell.as_str()));
+    for (label, cell, detail) in rows {
+        // "base : key", "keep : key" -- padded before coloring, so the escapes
+        // do not count as width and the colons line up
+        let label = format!("{label:<4}");
+        let label = match label.trim_end() {
+            "base" => ui::bold(&label),
+            "local" | "pin" => ui::accent(&label),
+            "prune" => ui::warn(&label),
+            _ => ui::dim(&label),
+        };
+        println!("    {label} : {cell:<width$}  {}", ui::dim(&detail));
     }
 }
 
@@ -483,17 +492,15 @@ fn warn_stale(repo: &Repo, pats: &[String], it: &Item, ad: &dyn Adapter, overlay
         }
     }
     if !shared.is_empty() {
-        eprintln!(
-            "[sync] warning: {} holds {}, which sync.rules does not claim -> \
-             they belong in the base file (next harvest moves them)",
+        warn!(
+            "{} holds {}, which sync.rules does not claim -> they belong in the base file (next harvest moves them)",
             central_rel(repo, &it.overlay),
             shared.join(", ")
         );
     }
     if !vetoed.is_empty() {
-        eprintln!(
-            "[sync] warning: {} holds {}, which a sync.rules '!' line keeps out of \
-             the central repo -> the next harvest drops them (the app's own value stays)",
+        warn!(
+            "{} holds {}, which a sync.rules '!' line keeps out of the central repo -> the next harvest drops them (the app's own value stays)",
             central_rel(repo, &it.overlay),
             vetoed.join(", ")
         );
@@ -503,8 +510,10 @@ fn warn_stale(repo: &Repo, pats: &[String], it: &Item, ad: &dyn Adapter, overlay
 // ---------------------------------------------------------------- render
 
 pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
-    println!("[render] {}  ({})", repo.source.display(), repo.name);
+    say!("render", "{}  {}", ui::bold(&repo.name), ui::dim(&repo.source.display().to_string()));
     let items = discover(repo, os);
+    // one column width for the whole block, so the rows line up
+    let width = ui::width(items.iter().map(|it| it.rel.as_str()));
     let recorded = central::read_hash(&repo.dir);
     if !force {
         // nothing recorded -> first render into this source repo, decided per
@@ -515,9 +524,9 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         let on_disk = items.iter().any(|it| it.target.exists());
         if let Some(h) = recorded.filter(|_| on_disk) {
             if content_hash(&items) != h {
-                eprintln!(
-                    "[render] {} changed since the last harvest -> refusing to write; \
-                     run `cfgsync harvest` first, or `cfgsync render --force` to overwrite",
+                refuse!(
+                    "render",
+                    "{} changed since the last harvest -> refusing to write; run `cfgsync harvest` first, or `cfgsync render --force` to overwrite",
                     repo.source.display()
                 );
                 return 1;
@@ -531,11 +540,7 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     for it in &items {
         let Some(ad) = it.ad else {
             if !it.copy.is_file() {
-                eprintln!(
-                    "[sync] warning: {} is claimed by adopt.rules but has no share copy yet \
-                     -> run `cfgsync harvest` to adopt it",
-                    it.rel
-                );
+                warn!("{} is claimed by adopt.rules but has no share copy yet -> run `cfgsync harvest` to adopt it", it.rel);
                 continue;
             }
             let want = std::fs::read(&it.copy).unwrap_or_default();
@@ -546,33 +551,24 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
                 continue;
             }
             if !force && recorded.is_none() && present && !have.is_empty() {
-                eprintln!(
-                    "[sync] warning: {} differs from share/{} and there is no harvest record \
-                     -> left alone; run `cfgsync harvest` to keep it, or \
-                     `cfgsync render --force` to overwrite it",
-                    it.rel, it.rel
-                );
+                warn!("{} differs from share/{} and there is no harvest record -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it", it.rel, it.rel);
                 blocked = true;
                 continue;
             }
-            println!("[render] {}  <= share/{}", it.rel, it.rel);
+            println!("{}", ui::row(width, &it.rel, &format!("<= share/{}", it.rel)));
             written += 1;
             if !dry {
                 if let Some(dir) = it.target.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
                 if let Err(e) = std::fs::copy(&it.copy, &it.target) {
-                    eprintln!("[sync] warning: cannot write {}: {e}", it.rel);
+                    warn!("cannot write {}: {e}", it.rel);
                 }
             }
             continue;
         };
         if !it.base.is_file() {
-            eprintln!(
-                "[sync] warning: {} is claimed by adopt.rules but has no base file yet \
-                 -> run `cfgsync harvest` to adopt it",
-                it.rel
-            );
+            warn!("{} is claimed by adopt.rules but has no base file yet -> run `cfgsync harvest` to adopt it", it.rel);
             continue;
         }
         let base_text = read(&it.base);
@@ -588,10 +584,8 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
                 continue;
             }
             if !force && recorded.is_none() && !actual.trim().is_empty() {
-                eprintln!(
-                    "[sync] warning: {} cannot be split by the .{} adapter and differs from \
-                     {} -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render \
-                     --force` to overwrite it",
+                warn!(
+                    "{} cannot be split by the .{} adapter and differs from {} -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it",
                     it.rel,
                     it.ext,
                     central_rel(repo, &it.base)
@@ -600,10 +594,16 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
                 continue;
             }
             println!(
-                "[render] {}  <= {} (carried whole, the .{} adapter cannot read it)",
-                it.rel,
-                central_rel(repo, &it.base),
-                it.ext
+                "{}",
+                ui::row(
+                    width,
+                    &it.rel,
+                    &format!(
+                        "<= {} (carried whole, the .{} adapter cannot read it)",
+                        central_rel(repo, &it.base),
+                        it.ext
+                    )
+                )
             );
             written += 1;
             if !dry {
@@ -613,9 +613,8 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         }
         let overlay_text = read(&it.overlay);
         if !ad.parses(&overlay_text) {
-            eprintln!(
-                "[sync] warning: {} is not valid for the .{} adapter (unresolved conflict?) \
-                 -> refusing to rewrite {}",
+            warn!(
+                "{} is not valid for the .{} adapter (unresolved conflict?) -> refusing to rewrite {}",
                 central_rel(repo, &it.overlay),
                 it.ext,
                 it.rel
@@ -624,11 +623,7 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         }
         let actual = read(&it.target);
         if !actual.trim().is_empty() && !ad.parses(&actual) {
-            eprintln!(
-                "[sync] warning: {} is not valid for the .{} adapter -> refusing to rewrite it \
-                 (fix the file, or drop its adopt.rules line)",
-                it.rel, it.ext
-            );
+            warn!("{} is not valid for the .{} adapter -> refusing to rewrite it (fix the file, or drop its adopt.rules line)", it.rel, it.ext);
             continue;
         }
         warn_stale(repo, &pats, it, ad, &overlay_text);
@@ -642,25 +637,26 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         // not: a hand edit and a stale copy look identical, and throwing either
         // away is the user's call
         if !force && recorded.is_none() && !actual.trim().is_empty() {
-            eprintln!(
-                "[sync] warning: {} differs from what base + overlay would write and there is \
-                 no harvest record -> left alone; run `cfgsync harvest` to keep it, or \
-                 `cfgsync render --force` to overwrite it",
+            warn!(
+                "{} differs from what base + overlay would write and there is no harvest record -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it",
                 it.rel
             );
             blocked = true;
             continue;
         }
-        println!("[render] {}  <= base + overlay", it.rel);
+        println!("{}", ui::row(width, &it.rel, "<= base + overlay"));
         written += 1;
         if !dry {
             write(&it.target, &text);
         }
     }
     if dry {
-        println!(
-            "[render] {}: {written} to write, {kept} unchanged",
-            repo.source.display()
+        say!(
+            "render",
+            "{}: {}, {} unchanged",
+            ui::dim(&repo.source.display().to_string()),
+            ui::warn(&format!("{written} to write")),
+            kept
         );
         return 0;
     }
@@ -669,14 +665,17 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     }
     if written > 0 {
         match central::commit_all(&repo.source, "cfgsync: render") {
-            Ok(true) => println!("[render] committed in the source repo"),
+            Ok(true) => say!("render", "{}", ui::ok("committed in the source repo")),
             Ok(false) => {}
-            Err(e) => eprintln!("[sync] warning: could not commit the source repo: {e}"),
+            Err(e) => warn!("could not commit the source repo: {e}"),
         }
     }
-    println!(
-        "[render] {}: {written} written, {kept} unchanged",
-        repo.source.display()
+    say!(
+        "render",
+        "{}: {}, {} unchanged",
+        ui::dim(&repo.source.display().to_string()),
+        ui::ok(&format!("{written} written")),
+        kept
     );
     0
 }
@@ -689,38 +688,37 @@ fn harvest_shared(repo: &Repo, it: &Item, dry: bool) -> (bool, bool) {
     let _ = repo;
     if !it.target.is_file() {
         match it.copy.is_file() {
-            true => eprintln!(
-                "[harvest] {}: not in the source repo yet, run `cfgsync render` first",
-                it.rel
-            ),
-            false => eprintln!(
-                "[harvest] {}: claimed by adopt.rules but not on disk yet -- nothing to adopt",
-                it.rel
-            ),
+            true => note!("harvest", "{}: not in the source repo yet, run `cfgsync render` first", it.rel),
+            false => note!("harvest", "{}: claimed by adopt.rules but not on disk yet -- nothing to adopt", it.rel),
         }
         return (false, false);
     }
     let source = std::fs::read(&it.target).unwrap_or_default();
     let adopting = !it.copy.is_file();
     if !adopting && std::fs::read(&it.copy).unwrap_or_default() == source {
-        println!("[harvest] {}  <-  no changes", it.rel);
         return (false, false);
     }
     println!(
-        "[harvest] {}: {} -> share/{}",
-        it.rel,
-        match adopting {
-            true => "carried whole (no adapter)",
-            false => "copied",
-        },
-        it.rel
+        "{}",
+        ui::row(
+            ui::width(std::iter::once(it.rel.as_str())),
+            &it.rel,
+            &format!(
+                "{} -> share/{}",
+                match adopting {
+                    true => "carried whole (no adapter)",
+                    false => "copied",
+                },
+                it.rel
+            )
+        )
     );
     if !dry {
         if let Some(dir) = it.copy.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Err(e) = std::fs::copy(&it.target, &it.copy) {
-            eprintln!("[sync] warning: cannot copy {}: {e}", it.rel);
+            warn!("cannot copy {}: {e}", it.rel);
             return (false, false);
         }
     }
@@ -728,11 +726,10 @@ fn harvest_shared(repo: &Repo, it: &Item, dry: bool) -> (bool, bool) {
 }
 
 pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
-    println!("[harvest] {}  ({})", repo.source.display(), repo.name);
+    say!("harvest", "{}  {}", ui::bold(&repo.name), ui::dim(&repo.source.display().to_string()));
     if !repo.adopt_rules().is_file() {
-        eprintln!(
-            "[harvest] warning: {} is missing -> nothing is managed; \
-             `cfgsync add {}` writes it",
+        warn!(
+            "{} is missing -> nothing is managed; `cfgsync add {}` writes it",
             format!("{}/{}", repo.name, adopt::NAME),
             repo.source.display()
         );
@@ -740,18 +737,21 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
     }
     let pats = rules::load(&repo.sync_rules());
     if pats.is_empty() {
-        eprintln!(
-            "[harvest] warning: sync.rules is missing or empty -> \
-             every change goes to the base file"
-        );
+        warn!("sync.rules is missing or empty -> every change goes to the base file");
     }
     warn_unmanaged(repo);
+    let items = discover(repo, os);
+    let width = ui::width(items.iter().map(|it| it.rel.as_str()));
     let mut harvested = 0usize;
     let mut adopted = 0usize;
-    for it in &discover(repo, os) {
+    let mut unchanged = 0usize;
+    for it in &items {
         let Some(ad) = it.ad else {
             let (changed, newly) = harvest_shared(repo, it, dry);
-            harvested += usize::from(changed);
+            match changed {
+                true => harvested += 1,
+                false => unchanged += 1,
+            }
             adopted += usize::from(newly);
             continue;
         };
@@ -761,19 +761,11 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
         let adopting = !it.base.is_file();
         if adopting {
             if !it.target.is_file() {
-                eprintln!(
-                    "[harvest] {}: claimed by adopt.rules but not on disk yet -- \
-                     nothing to adopt",
-                    it.rel
-                );
+                note!("harvest", "{}: claimed by adopt.rules but not on disk yet -- nothing to adopt", it.rel);
                 continue;
             }
             if current.trim().is_empty() {
-                eprintln!(
-                    "[harvest] {}: is empty -> nothing to adopt (fill it in, or drop \
-                     its adopt.rules line)",
-                    it.rel
-                );
+                note!("harvest", "{}: is empty -> nothing to adopt (fill it in, or drop its adopt.rules line)", it.rel);
                 continue;
             }
         } else {
@@ -782,22 +774,24 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
                 // carried whole: the source repo's bytes become the base, no
                 // key is split out of a file the adapter cannot read
                 if current.trim().is_empty() {
-                    eprintln!(
-                        "[harvest] {}: is empty -> refusing to harvest it (run \
-                         `cfgsync render` to rebuild it)",
-                        it.rel
-                    );
+                    note!("harvest", "{}: is empty -> refusing to harvest it (run `cfgsync render` to rebuild it)", it.rel);
                     continue;
                 }
                 if current == base_text {
-                    println!("[harvest] {}  <-  no changes", it.rel);
+                    unchanged += 1;
                     continue;
                 }
                 println!(
-                    "[harvest] {}: carried whole -> {} (the .{} adapter cannot read it)",
-                    it.rel,
-                    central_rel(repo, &it.base),
-                    it.ext
+                    "{}",
+                    ui::row(
+                        width,
+                        &it.rel,
+                        &format!(
+                            "carried whole -> {} (the .{} adapter cannot read it)",
+                            central_rel(repo, &it.base),
+                            it.ext
+                        )
+                    )
                 );
                 harvested += 1;
                 if !dry {
@@ -806,9 +800,8 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
                 continue;
             }
             if !ad.parses(&read(&it.overlay)) {
-                eprintln!(
-                    "[sync] warning: {} is not valid for the .{} adapter (unresolved \
-                     conflict?) -> refusing to harvest {}",
+                warn!(
+                    "{} is not valid for the .{} adapter (unresolved conflict?) -> refusing to harvest {}",
                     central_rel(repo, &it.overlay),
                     it.ext,
                     it.rel
@@ -816,23 +809,15 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
                 continue;
             }
             if !it.target.is_file() {
-                eprintln!("[harvest] {}: not in the source repo yet, run `cfgsync render` first", it.rel);
+                note!("harvest", "{}: not in the source repo yet, run `cfgsync render` first", it.rel);
                 continue;
             }
             if current.trim().is_empty() {
-                eprintln!(
-                    "[harvest] {}: is empty -> refusing to harvest it (run `cfgsync render` \
-                     to rebuild it)",
-                    it.rel
-                );
+                note!("harvest", "{}: is empty -> refusing to harvest it (run `cfgsync render` to rebuild it)", it.rel);
                 continue;
             }
             if !ad.parses(&current) {
-                eprintln!(
-                    "[sync] warning: {} is not valid for the .{} adapter -> refusing to \
-                     harvest it",
-                    it.rel, it.ext
-                );
+                warn!("{} is not valid for the .{} adapter -> refusing to harvest it", it.rel, it.ext);
                 continue;
             }
         }
@@ -841,23 +826,35 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
             Some(text) => *text == read(&it.overlay),
             None => !it.overlay.is_file(),
         };
-        let unchanged = !adopting && p.base.is_none() && overlay_same && p.target == current;
-        if unchanged {
-            println!("[harvest] {}  <-  no changes", it.rel);
+        let same = !adopting && p.base.is_none() && overlay_same && p.target == current;
+        if same {
+            unchanged += 1;
             continue;
         }
         if adopting {
             println!(
-                "[harvest] {}: adopted -> base, {} machine-owned -> platform/{os}",
-                it.rel,
-                p.local.len()
+                "{}",
+                ui::row(
+                    width,
+                    &it.rel,
+                    &format!(
+                        "adopted -> base, {} machine-owned -> platform/{os}",
+                        p.local.len()
+                    )
+                )
             );
         } else {
             println!(
-                "[harvest] {}: {} shared -> base, {} machine-owned -> platform/{os}",
-                it.rel,
-                p.shared.len(),
-                p.local.len()
+                "{}",
+                ui::row(
+                    width,
+                    &it.rel,
+                    &format!(
+                        "{} shared -> base, {} machine-owned -> platform/{os}",
+                        p.shared.len(),
+                        p.local.len()
+                    )
+                )
             );
         }
         report(&p);
@@ -879,21 +876,30 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
         }
     }
     if dry {
-        println!(
-            "[harvest] {}: {harvested} to harvest",
-            repo.source.display()
+        say!(
+            "harvest",
+            "{}: {}, {} unchanged",
+            ui::dim(&repo.source.display().to_string()),
+            ui::warn(&format!("{harvested} to harvest")),
+            unchanged
         );
         return 0;
     }
-    central::write_hash(&repo.dir, content_hash(&discover(repo, os)));
+    central::write_hash(&repo.dir, content_hash(&items));
     match central::commit_all(&repo.source, "cfgsync: harvest") {
-        Ok(true) => println!("[harvest] committed in the source repo"),
+        Ok(true) => say!("harvest", "{}", ui::ok("committed in the source repo")),
         Ok(false) => {}
-        Err(e) => eprintln!("[sync] warning: could not commit the source repo: {e}"),
+        Err(e) => warn!("could not commit the source repo: {e}"),
     }
-    println!(
-        "[harvest] {}: {harvested} harvested ({adopted} adopted)",
-        repo.source.display()
+    say!(
+        "harvest",
+        "{}: {}",
+        ui::dim(&repo.source.display().to_string()),
+        match harvested {
+            0 => ui::ok("no changes"),
+            1 => format!("{} harvested ({adopted} adopted), {unchanged} unchanged", ui::ok("1")),
+            n => format!("{n} harvested ({adopted} adopted), {unchanged} unchanged"),
+        }
     );
     0
 }
@@ -901,39 +907,29 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
 // ---------------------------------------------------------------- status
 
 pub fn status(repo: &Repo, os: &str) -> i32 {
-    println!("[status] {}  ({})", repo.source.display(), repo.name);
+    say!("status", "{}  {}", ui::bold(&repo.name), ui::dim(&repo.source.display().to_string()));
     let items = discover(repo, os);
+    let width = ui::width(items.iter().map(|it| it.rel.as_str()));
     let pats = rules::load(&repo.sync_rules());
     let mut changed = 0usize;
     for it in &items {
         let Some(ad) = it.ad else {
             if !it.copy.is_file() {
-                println!(
-                    "[status]   ?  {}  (claimed by adopt.rules, no share copy yet -- \
-                     `cfgsync harvest` adopts it)",
-                    it.rel
-                );
+                row('?', width, &it.rel, "claimed by adopt.rules, no share copy yet -- `cfgsync harvest` adopts it");
                 changed += 1;
             } else if !it.target.is_file() {
-                println!(
-                    "[status]   +  {}  (not on disk -- `cfgsync render` writes it)",
-                    it.rel
-                );
+                row('+', width, &it.rel, "not on disk -- `cfgsync render` writes it");
                 changed += 1;
             } else if std::fs::read(&it.target).unwrap_or_default()
                 != std::fs::read(&it.copy).unwrap_or_default()
             {
-                println!("[status]   M  {}  (differs from share/{})", it.rel, it.rel);
+                row('M', width, &it.rel, &format!("differs from share/{}", it.rel));
                 changed += 1;
             }
             continue;
         };
         if !it.base.is_file() {
-            println!(
-                "[status]   ?  {}  (claimed by adopt.rules, no base yet -- \
-                 `cfgsync harvest` adopts it)",
-                it.rel
-            );
+            row('?', width, &it.rel, "claimed by adopt.rules, no base yet -- `cfgsync harvest` adopts it");
             changed += 1;
             continue;
         }
@@ -941,17 +937,18 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
         if !ad.parses(&base_text) {
             // carried whole: nothing to merge, compare the bytes
             if !it.target.is_file() {
-                println!(
-                    "[status]   +  {}  (not on disk -- `cfgsync render` writes it)",
-                    it.rel
-                );
+                row('+', width, &it.rel, "not on disk -- `cfgsync render` writes it");
                 changed += 1;
             } else if read(&it.target) != base_text {
-                println!(
-                    "[status]   M  {}  (differs from {}, which the .{} adapter carries whole)",
-                    it.rel,
-                    central_rel(repo, &it.base),
-                    it.ext
+                row(
+                    'M',
+                    width,
+                    &it.rel,
+                    &format!(
+                        "differs from {}, which the .{} adapter carries whole",
+                        central_rel(repo, &it.base),
+                        it.ext
+                    ),
                 );
                 changed += 1;
             }
@@ -961,21 +958,18 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
         let merged = ad.apply(&base_text, &ad.overlay_ops(&overlay_text));
         let expected = keep_local(&pats, it, ad, &merged, &read(&it.target));
         if !it.target.is_file() {
-            println!(
-                "[status]   +  {}  (not on disk -- `cfgsync render` writes it)",
-                it.rel
-            );
+            row('+', width, &it.rel, "not on disk -- `cfgsync render` writes it");
             changed += 1;
             continue;
         }
         let actual = read(&it.target);
         if actual != expected {
             let (shared, local, _) = split_ops(&pats, it, ad.diff(&base_text, &actual));
-            println!(
-                "[status]   M  {}  ({} to the base, {} to this machine)",
-                it.rel,
-                shared.len(),
-                local.len()
+            row(
+                'M',
+                width,
+                &it.rel,
+                &format!("{} to the base, {} to this machine", shared.len(), local.len()),
             );
             changed += 1;
         }
@@ -983,16 +977,31 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
     if let Some(recorded) = central::read_hash(&repo.dir) {
         if recorded != content_hash(&items) {
             println!(
-                "[status]   render would refuse: content changed since the last harvest \
-                 -> `cfgsync harvest`"
+                "{}   {}",
+                ui::tag("status"),
+                ui::warn("render would refuse: content changed since the last harvest -> `cfgsync harvest`")
             );
         }
     }
     match changed {
-        0 => println!("[status] clean"),
-        n => println!("[status] {n} file(s) differ from the central copy"),
+        0 => say!("status", "{}", ui::ok("clean")),
+        n => say!("status", "{}", ui::warn(&format!("{n} file(s) differ from the central copy"))),
     }
     0
+}
+
+/// one `[status]` row: a colored one-letter code, the file, then the reason
+fn row(code: char, width: usize, rel_path: &str, detail: &str) {
+    let code = match code {
+        'M' => ui::warn(&code.to_string()),
+        '+' => ui::ok(&code.to_string()),
+        _ => ui::bad(&code.to_string()),
+    };
+    println!(
+        "{}   {code}  {rel_path:<width$}  {}",
+        ui::tag("status"),
+        ui::dim(detail)
+    );
 }
 
 // ---------------------------------------------------------------- add / edit
@@ -1009,21 +1018,18 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
     };
     let Some(source) = central::canonical(&absolute) else {
         if absolute.exists() {
-            eprintln!(
-                "[add] only directories are managed: {} -- add the directory that holds it, \
-                 then list the file there in adopt.rules",
+            refuse!(
+                "add",
+                "only directories are managed: {} -- add the directory that holds it, then list the file there in adopt.rules",
                 absolute.display()
             );
         } else {
-            eprintln!("[add] no such path: {raw}");
+            refuse!("add", "no such path: {raw}");
         }
         return 2;
     };
     if !root.is_dir() {
-        eprintln!(
-            "[add] no central repo at {} -- run `cfgsync init` first",
-            root.display()
-        );
+        refuse!("add", "no central repo at {} -- run `cfgsync init` first", root.display());
         return 2;
     }
     let wanted = match wanted {
@@ -1031,9 +1037,9 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
         None => central::suggest_name(&source),
     };
     if !central::valid_name(&wanted) {
-        eprintln!(
-            "[add] not a usable central name: {wanted} -- one directory name, \
-             letters/digits/'.'/'_'/'-', not starting with '.'"
+        refuse!(
+            "add",
+            "not a usable central name: {wanted} -- one directory name, letters/digits/'.'/'_'/'-', not starting with '.'"
         );
         return 2;
     }
@@ -1043,22 +1049,22 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
         None => match central::claim(root, &source, os, &wanted) {
             Ok(name) => name,
             Err(problem) => {
-                eprintln!("[add] {problem}");
+                refuse!("add", "{problem}");
                 return 1;
             }
         },
     };
     if managed.is_some() && name != wanted {
-        println!("[add] already managed as {name}");
+        say!("add", "{}", ui::ok(&format!("already managed as {name}")));
     } else if managed.is_none() && name != wanted {
-        println!("[add] {wanted} already stands for another directory -> using {name}");
+        say!("add", "{}", ui::warn(&format!("{wanted} already stands for another directory -> using {name}")));
     }
     let dir = root.join(&name);
-    println!("[add] {} -> {}", source.display(), dir.display());
+    say!("add", "{} -> {}", source.display(), dir.display());
     if let Some(parent) = source.parent().and_then(|p| central::entry_for_path(root, p, os)) {
         if parent.source() != Some(source.as_path()) {
-            eprintln!(
-                "[sync] warning: {} is inside the managed repo {} -> both will manage it",
+            warn!(
+                "{} is inside the managed repo {} -> both will manage it",
                 source.display(),
                 parent.source().unwrap_or(&parent.dir).display()
             );
@@ -1068,20 +1074,20 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
     if !dry {
         paths::set(&dir, os, &source);
     }
-    println!("[add] {name}/{}: {line}", paths::NAME);
+    say!("add", "{}: {line}", ui::dim(&format!("{name}/{}", paths::NAME)));
     let adopt_rules = dir.join(adopt::NAME);
     let sync_rules = dir.join(rules::NAME);
     if adopt_rules.is_file() && sync_rules.is_file() {
-        println!("[add] already in the central repo: adopt.rules, sync.rules kept");
+        say!("add", "{}", ui::dim("already in the central repo: adopt.rules, sync.rules kept"));
     } else {
         if !adopt_rules.is_file() {
-            println!("[add] {} written", format!("{name}/{}", adopt::NAME));
+            say!("add", "{} written", format!("{name}/{}", adopt::NAME));
             if !dry {
                 write(&adopt_rules, &adopt::template(&candidates(&source)));
             }
         }
         if !sync_rules.is_file() {
-            println!("[add] {} written", format!("{name}/{}", rules::NAME));
+            say!("add", "{} written", format!("{name}/{}", rules::NAME));
             if !dry {
                 write(&sync_rules, RULES_TEMPLATE);
             }
@@ -1094,7 +1100,7 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
     }
     if !source.join(".git").exists() {
         if dry {
-            println!("[add] would git init {}", source.display());
+            say!("add", "{}", ui::warn(&format!("would git init {}", source.display())));
         } else {
             match Command::new("git")
                 .arg("-C")
@@ -1102,21 +1108,21 @@ pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: 
                 .args(["init", "-q"])
                 .output()
             {
-                Ok(o) if o.status.success() => println!("[add] git init {}", source.display()),
+                Ok(o) if o.status.success() => {
+                    say!("add", "git init {}", source.display())
+                }
                 Ok(o) => {
-                    eprintln!("[add] git init failed: {}", central::git_err(&o));
+                    refuse!("add", "git init failed: {}", central::git_err(&o));
                     return 1;
                 }
                 Err(e) => {
-                    eprintln!("[add] cannot run git: {e}");
+                    refuse!("add", "cannot run git: {e}");
                     return 1;
                 }
             }
         }
     }
-    println!(
-        "[add] next: `cfgsync edit -a` to list the files, then `cfgsync harvest`"
-    );
+    say!("add", "{}", ui::dim("next: `cfgsync edit -a` to list the files, then `cfgsync harvest`"));
     0
 }
 
@@ -1150,20 +1156,20 @@ pub fn edit(repo: &Repo, which: RulesFile) -> i32 {
             RulesFile::Path => paths::template(),
         };
         write(&path, &text);
-        println!("[edit] created {}", path.display());
+        say!("edit", "created {}", path.display());
     }
     let editor = editor_command();
     let mut parts = editor.split_whitespace();
     let Some(binary) = parts.next() else {
-        eprintln!("[edit] no editor configured -- set $EDITOR");
+        refuse!("edit", "no editor configured -- set $EDITOR");
         return 2;
     };
-    println!("[edit] {} ({editor})", path.display());
+    say!("edit", "{} ({editor})", path.display());
     match Command::new(binary).args(parts).arg(&path).status() {
         Ok(status) if status.success() => 0,
         Ok(_) => 1,
         Err(e) => {
-            eprintln!("[edit] cannot run {editor}: {e} (set $EDITOR)");
+            refuse!("edit", "cannot run {editor}: {e} (set $EDITOR)");
             2
         }
     }

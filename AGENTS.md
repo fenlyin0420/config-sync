@@ -32,6 +32,7 @@ temp directory.
 | `src/paths.rs` | `path.rules` parsing: per-platform real path, `~` / `$VAR` / `%VAR%` expansion, in-place rewrite |
 | `src/engine.rs` | discovery, the harvest/render plan, `harvest` / `render` / `status`, `add` / `edit` |
 | `src/fsx.rs` | `read` (BOM-trimmed), `write` (LF), `rel`, `walk` |
+| `src/ui.rs` | the palette: `say!` / `warn!` / `fail!` / `note!` / `refuse!`, `row`, `width`, tty + `NO_COLOR` detection |
 | `src/adopt.rs` | `adopt.rules` parsing: gitignore-style allowlist of the managed files |
 | `src/rules.rs` | `sync.rules` parsing and fnmatch-style glob matching |
 | `src/formats/mod.rs` | `Adapter` trait, `Op`/`OpData`/`Kind`, the extension + file-name registry |
@@ -201,8 +202,18 @@ Data flow, both directions:
   text is Chinese because that is the file users actually read, while code and
   docs stay English.
 - Output style: `[command] ...` on stdout for what happened, `[sync] warning:`
-  on stderr for what needs attention. Keep messages stable — tests assert on
-  them.
+  on stderr for what needs attention. Keep messages and their shape stable —
+  tests assert on them. Every print goes through `ui` (`say!`, `warn!`,
+  `fail!`, `note!`, `refuse!`), never a bare `println!`: that is what makes the
+  tag, the color and the off-a-terminal case one decision instead of a hundred.
+- Color marks structure only — the command tag, a status letter, an op label, a
+  result word — never a path or a value, so stripping the escapes leaves the
+  text readable. It is decided per stream from `is_terminal()`, with
+  `CFGSYNC_COLOR` / `NO_COLOR` / `CLICOLOR*` overriding; `cd`'s bare path stays
+  uncolored because a command substitution must get the path alone.
+- A block of rows lines up on one column width (`ui::width` + `ui::row`) and
+  unchanged files are counted, not listed: one header, the rows that changed,
+  one summary.
 - Exit codes: `0` success, `1` the command refused or a git command failed, `2`
   usage or I/O errors. `--help` / `--version` print to stdout and exit `0`.
 - `--dry-run` must print the same plan without writing anything, including the

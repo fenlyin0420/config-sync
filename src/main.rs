@@ -13,6 +13,8 @@
 //! `harvest` reads a source repo into the central one, `render` writes it back,
 //! `push` / `pull` move the central repo to and from the cloud.
 
+#[macro_use]
+mod ui;
 mod adopt;
 mod central;
 mod engine;
@@ -76,6 +78,9 @@ platform resolution (first hit wins):
   --os NAME > CFGSYNC_OS > <central>/.os (written by init) > host
 
 exit codes: 0 ok, 1 refused or a git command failed, 2 usage or I/O
+
+color: on for a terminal, off for a pipe or a redirect; CFGSYNC_COLOR=always|never
+overrides it, NO_COLOR=1 turns it off.
 ";
 
 struct Cli {
@@ -253,7 +258,7 @@ fn run(cli: Cli) -> i32 {
                 return 2;
             }
             if !root.is_dir() {
-                eprintln!("[cd] no central repo at {} -- run `cfgsync init`", root.display());
+                refuse!("cd", "no central repo at {} -- run `cfgsync init`", root.display());
                 return 2;
             }
             enter(&root)
@@ -279,9 +284,8 @@ fn run(cli: Cli) -> i32 {
             };
             let source = entry.source().map(Path::to_path_buf).unwrap_or_default();
             if source.as_os_str().is_empty() && which != engine::RulesFile::Path {
-                eprintln!(
-                    "[sync] error: {} has no path for {os} -- `cfgsync add DIR {}` here, \
-                     or edit -p",
+                fail!(
+                    "{} has no path for {os} -- `cfgsync add DIR {}` here, or edit -p",
                     entry.name, entry.name
                 );
                 return 1;
@@ -292,15 +296,15 @@ fn run(cli: Cli) -> i32 {
         "pull" => central::pull(&root, cli.dry),
         "adaptor" | "formats" => {
             let rows = formats::inventory();
-            let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
-            println!("[adaptor] extension or file name -> key-level sync:");
+            let width = ui::width(rows.iter().map(|(name, _)| *name).chain(std::iter::once("share")));
+            say!("adaptor", "extension or file name -> key-level sync");
             for (name, keys) in rows {
-                println!("[adaptor]   {name:<width$}  {}", keys.join("  "));
+                println!("  {name:<width$}  {}", ui::dim(&keys.join("  ")));
             }
             println!(
-                "[adaptor]   {:<width$}  any other file adopt.rules claims: carried whole in \
-                 share/, the same on every platform",
-                "share"
+                "  {:<width$}  {}",
+                "share",
+                ui::dim("any other file adopt.rules claims: carried whole, the same on every platform")
             );
             0
         }
@@ -317,19 +321,16 @@ fn run(cli: Cli) -> i32 {
 fn pick(root: &Path, cli: &Cli, os: &str) -> Result<Vec<central::Entry>, i32> {
     if cli.all {
         for name in central::unconfigured(root) {
-            eprintln!(
-                "[sync] warning: {name} has no {}/{} (old layout?) -> `cfgsync rm {name}` \
-                 and `cfgsync add DIR {name}` again",
+            warn!(
+                "{name} has no {}/{} (old layout?) -> `cfgsync rm {name}` and \
+                 `cfgsync add DIR {name}` again",
                 name,
                 paths::NAME
             );
         }
         let entries = central::entries(root, os);
         if entries.is_empty() {
-            eprintln!(
-                "[sync] no source repos in {} -- `cfgsync add DIR` first",
-                root.display()
-            );
+            refuse!("sync", "no source repos in {} -- `cfgsync add DIR` first", root.display());
             return Err(2);
         }
         return Ok(entries);
@@ -352,9 +353,9 @@ fn pick_one(root: &Path, arg: Option<&str>, os: &str) -> Result<central::Entry, 
     match central::entry_for_path(root, &start, os) {
         Some(entry) => Ok(entry),
         None => {
-            eprintln!(
-                "[sync] {} is not a managed source repo -- `cfgsync add {}`, or pass -a for \
-                 all of them",
+            refuse!(
+                "sync",
+                "{} is not a managed source repo -- `cfgsync add {}`, or pass -a for all of them",
                 start.display(),
                 start.display()
             );
@@ -414,8 +415,9 @@ fn reachable(
             None
         }
         Create::Plan => {
-            println!(
-                "[render] {}: not there yet -> would create it (from {}/{})",
+            say!(
+                "render",
+                "{}: not there yet -> would create it (from {}/{})",
                 path.display(),
                 entry.name,
                 paths::NAME
@@ -424,8 +426,9 @@ fn reachable(
         }
         Create::Now => match std::fs::create_dir_all(&path) {
             Ok(()) => {
-                println!(
-                    "[render] {}: not there yet -> created it (from {}/{})",
+                say!(
+                    "render",
+                    "{}: not there yet -> created it (from {}/{})",
                     path.display(),
                     entry.name,
                     paths::NAME
@@ -433,7 +436,7 @@ fn reachable(
                 Some(path)
             }
             Err(e) => {
-                eprintln!("[sync] error: {}: cannot create {}: {e}", entry.name, path.display());
+                fail!("{}: cannot create {}: {e}", entry.name, path.display());
                 None
             }
         },
@@ -448,7 +451,7 @@ fn enter(path: &Path) -> i32 {
         println!("{}", path.display());
         return 0;
     }
-    println!("[cd] {}", path.display());
+    say!("cd", "{}", path.display());
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|shell| !shell.trim().is_empty())
@@ -459,11 +462,11 @@ fn enter(path: &Path) -> i32 {
                 "/bin/sh".to_string()
             }
         });
-    println!("[cd] {shell} here -- leave it to come back");
+    say!("cd", "{}", ui::dim(&format!("{shell} here -- leave it to come back")));
     match std::process::Command::new(&shell).current_dir(path).status() {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("[sync] error: cannot start {shell}: {e}");
+            fail!("cannot start {shell}: {e}");
             1
         }
     }
@@ -471,8 +474,8 @@ fn enter(path: &Path) -> i32 {
 
 fn report(skip: bool, problem: &str) {
     if skip {
-        eprintln!("[sync] warning: {problem} -> skipped");
+        warn!("{problem} -> skipped");
     } else {
-        eprintln!("[sync] error: {problem}");
+        fail!("{problem}");
     }
 }

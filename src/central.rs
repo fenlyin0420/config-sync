@@ -21,6 +21,7 @@ use std::process::{Command, Output};
 
 use crate::fsx::{read, write};
 use crate::paths;
+use crate::ui;
 
 pub const ENV: &str = "CFGSYNC_CENTRAL";
 pub const HASH_FILE: &str = ".hash";
@@ -473,24 +474,28 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 pub fn init(root: &Path, remote: Option<&str>, dry: bool) -> i32 {
     let created = !root.is_dir();
-    println!(
-        "[init] central repo {}{}",
+    say!(
+        "init",
+        "central repo {}{}",
         root.display(),
-        if created { "  (created)" } else { "" }
+        match created {
+            true => ui::ok("  (created)"),
+            false => String::new(),
+        }
     );
     if dry {
-        println!("[init] would create base dirs, .gitignore, .os and git init");
+        say!("init", "{}", ui::warn("would create base dirs, .gitignore, .os and git init"));
         if let Some(url) = remote {
-            println!("[init] would set origin -> {url}");
+            say!("init", "would set origin -> {url}");
         }
         return 0;
     }
     if let Err(e) = std::fs::create_dir_all(root) {
-        eprintln!("[init] cannot create {}: {e}", root.display());
+        refuse!("init", "cannot create {}: {e}", root.display());
         return 2;
     }
     for line in ensure_gitignore(root) {
-        println!("[init] {GITIGNORE}: gitignored {line}");
+        say!("init", "{}: gitignored {line}", ui::dim(GITIGNORE));
     }
     if !is_repo(root) {
         let out = Command::new("git")
@@ -499,21 +504,28 @@ pub fn init(root: &Path, remote: Option<&str>, dry: bool) -> i32 {
             .args(["init", "-q"])
             .output();
         match out {
-            Ok(o) if o.status.success() => println!("[init] git init"),
+            Ok(o) if o.status.success() => say!("init", "{}", ui::ok("git init")),
             Ok(o) => {
-                eprintln!("[init] git init failed: {}", git_err(&o));
+                refuse!("init", "git init failed: {}", git_err(&o));
                 return 1;
             }
             Err(e) => {
-                eprintln!("[init] cannot run git: {e}");
+                refuse!("init", "cannot run git: {e}");
                 return 1;
             }
         }
     }
     let os = host_os();
     write_os(root, &os);
-    println!("[init] platform {os} recorded in {OS_FILE}");
-    println!("[init] each source repo records its own per-platform path in {}", paths::NAME);
+    say!("init", "platform {} recorded in {}", ui::bold(&os), ui::dim(OS_FILE));
+    say!(
+        "init",
+        "{}",
+        ui::dim(&format!(
+            "each source repo records its own per-platform path in {}",
+            paths::NAME
+        ))
+    );
     if let Some(url) = remote {
         let verb = if git_ok(root, &["remote", "get-url", "origin"]) {
             "set-url"
@@ -521,23 +533,23 @@ pub fn init(root: &Path, remote: Option<&str>, dry: bool) -> i32 {
             "add"
         };
         match git(root, &["remote", verb, "origin", url]) {
-            Some(o) if o.status.success() => println!("[init] origin -> {url}"),
+            Some(o) if o.status.success() => say!("init", "origin -> {url}"),
             Some(o) => {
-                eprintln!("[init] git remote {verb} failed: {}", git_err(&o));
+                refuse!("init", "git remote {verb} failed: {}", git_err(&o));
                 return 1;
             }
             None => return 1,
         }
     } else if !git_ok(root, &["remote", "get-url", "origin"]) {
-        println!("[init] no origin yet -- `cfgsync init --remote <url>` adds one");
+        say!("init", "{}", ui::warn("no origin yet -- `cfgsync init --remote <url>` adds one"));
     }
     if !git_ok(root, &["rev-parse", "--verify", "--quiet", "HEAD"])
         && git_ok(root, &["remote", "get-url", "origin"])
     {
-        println!("[init] this machine has no commits yet -- `cfgsync pull` brings the cloud copy");
+        say!("init", "this machine has no commits yet -- `cfgsync pull` brings the cloud copy");
         return 0;
     }
-    println!("[init] next: cfgsync add DIR");
+    say!("init", "{}", ui::dim("next: cfgsync add DIR"));
     0
 }
 
@@ -564,13 +576,13 @@ pub fn remove(root: &Path, target: &str, os: &str, dry: bool) -> i32 {
         Some(e) => entry(root, &e.name, os),
         None => {
             let Some(abs) = canonical(Path::new(target)) else {
-                eprintln!("[rm] no such directory: {target}");
+                refuse!("rm", "no such directory: {target}");
                 return 2;
             };
             match entry_for_path(root, &abs, os) {
                 Some(e) => e,
                 None => {
-                    eprintln!("[rm] not managed: {target} (no source repo in {} has that path)", root.display());
+                    refuse!("rm", "not managed: {target} (no source repo in {} has that path)", root.display());
                     return 2;
                 }
             }
@@ -582,18 +594,18 @@ pub fn remove(root: &Path, target: &str, os: &str, dry: bool) -> i32 {
         Some(path) => path.display().to_string(),
         None => format!("{name} (no path for {os})"),
     };
-    println!("[rm] {shown} ({name}): removed from the central repo");
-    println!("[rm] the directory itself and its git history are untouched");
+    say!("rm", "{shown} ({name}): {}", ui::ok("removed from the central repo"));
+    say!("rm", "{}", ui::dim("the directory itself and its git history are untouched"));
     if dry {
         return 0;
     }
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {
-            println!("[rm] next: cfgsync push");
+            say!("rm", "{}", ui::dim("next: cfgsync push"));
             0
         }
         Err(e) => {
-            eprintln!("[rm] cannot remove {}: {e}", dir.display());
+            refuse!("rm", "cannot remove {}: {e}", dir.display());
             2
         }
     }
@@ -601,11 +613,11 @@ pub fn remove(root: &Path, target: &str, os: &str, dry: bool) -> i32 {
 
 pub fn push(root: &Path, message: Option<&str>, dry: bool) -> i32 {
     if !root.is_dir() {
-        eprintln!("[push] no central repo at {} -- run `cfgsync init`", root.display());
+        refuse!("push", "no central repo at {} -- run `cfgsync init`", root.display());
         return 2;
     }
     if !is_repo(root) {
-        eprintln!("[push] {} is not a git repo -- run `cfgsync init`", root.display());
+        refuse!("push", "{} is not a git repo -- run `cfgsync init`", root.display());
         return 2;
     }
     let message = match message {
@@ -616,17 +628,17 @@ pub fn push(root: &Path, message: Option<&str>, dry: bool) -> i32 {
     let dirty = dirty_count(root);
     if dirty > 0 {
         if dry {
-            println!("[push] would commit {dirty} change(s): {message}");
+            say!("push", "{}", ui::warn(&format!("would commit {dirty} change(s): {message}")));
         } else {
             match commit_all(root, &message) {
                 Ok(committed_now) => {
                     committed = committed_now;
                     if committed {
-                        println!("[push] committed {dirty} change(s): {message}");
+                        say!("push", "committed {dirty} change(s): {message}");
                     }
                 }
                 Err(e) => {
-                    eprintln!("[push] commit failed: {e}");
+                    refuse!("push", "commit failed: {e}");
                     return 1;
                 }
             }
@@ -634,16 +646,17 @@ pub fn push(root: &Path, message: Option<&str>, dry: bool) -> i32 {
     }
     let upstream = git_ok(root, &["rev-parse", "--abbrev-ref", "@{u}"]);
     if !git_ok(root, &["remote", "get-url", "origin"]) {
-        eprintln!(
-            "[sync] warning: no `origin` remote -- `cfgsync init --remote <url>` adds one, \
-             work is committed locally"
-        );
+        warn!("no `origin` remote -- `cfgsync init --remote <url>` adds one, work is committed locally");
         return if committed { 0 } else { 1 };
     }
     if dry {
-        println!(
-            "[push] would push{}",
-            if upstream { "" } else { " (-u origin HEAD)" }
+        say!(
+            "push",
+            "{}",
+            ui::warn(&format!(
+                "would push{}",
+                if upstream { "" } else { " (-u origin HEAD)" }
+            ))
         );
         return 0;
     }
@@ -654,15 +667,15 @@ pub fn push(root: &Path, message: Option<&str>, dry: bool) -> i32 {
     };
     match out {
         Some(o) if o.status.success() => {
-            println!("[push] pushed");
+            say!("push", "{}", ui::ok("pushed"));
             0
         }
         Some(o) => {
-            eprintln!("[push] FAILED: {}", git_err(&o));
+            refuse!("push", "FAILED: {}", git_err(&o));
             1
         }
         None => {
-            eprintln!("[push] git is not on PATH");
+            refuse!("push", "git is not on PATH");
             1
         }
     }
@@ -718,37 +731,37 @@ fn drop_generated_gitignore(root: &Path) {
 
 pub fn pull(root: &Path, dry: bool) -> i32 {
     if !root.is_dir() {
-        eprintln!("[pull] no central repo at {} -- run `cfgsync init`", root.display());
+        refuse!("pull", "no central repo at {} -- run `cfgsync init`", root.display());
         return 2;
     }
     if !is_repo(root) {
-        eprintln!("[pull] {} is not a git repo -- run `cfgsync init`", root.display());
+        refuse!("pull", "{} is not a git repo -- run `cfgsync init`", root.display());
         return 2;
     }
     if unborn(root) {
         if !has_origin(root) {
-            println!("[pull] no origin remote and no commits yet, nothing to pull");
+            say!("pull", "{}", ui::ok("no origin remote and no commits yet, nothing to pull"));
             return 0;
         }
         if dry {
-            println!("[pull] would fetch origin and check out its branch");
+            say!("pull", "{}", ui::warn("would fetch origin and check out its branch"));
             return 0;
         }
         match git(root, &["fetch", "origin"]) {
             Some(o) if o.status.success() => {}
             Some(o) => {
-                eprintln!("[pull] fetch failed: {}", git_err(&o));
+                refuse!("pull", "fetch failed: {}", git_err(&o));
                 return 1;
             }
             None => {
-                eprintln!("[pull] git is not on PATH");
+                refuse!("pull", "git is not on PATH");
                 return 1;
             }
         }
         let remote = match remote_branch(root) {
             Ok(name) => name,
             Err(e) => {
-                eprintln!("[pull] {e}");
+                refuse!("pull", "{e}");
                 return 1;
             }
         };
@@ -757,27 +770,27 @@ pub fn pull(root: &Path, dry: bool) -> i32 {
         match git(root, &["checkout", "-q", "-B", &branch, "--track", &remote]) {
             Some(o) if o.status.success() => {}
             Some(o) => {
-                eprintln!("[pull] cannot check out {remote}: {}", git_err(&o));
+                refuse!("pull", "cannot check out {remote}: {}", git_err(&o));
                 return 1;
             }
             None => return 1,
         }
         ensure_gitignore(root);
-        println!("[pull] checked out {remote} -- the cloud copy is here now");
-        println!("[pull] next: cfgsync add DIR, then cfgsync render");
+        say!("pull", "checked out {remote} -- {}", ui::ok("the cloud copy is here now"));
+        say!("pull", "{}", ui::dim("next: cfgsync add DIR, then cfgsync render"));
         return 0;
     }
     let dirty = dirty_count(root);
     if dirty > 0 {
         let message = format!("chore: sync {}", utc_stamp());
         if dry {
-            println!("[pull] would commit {dirty} change(s) first: {message}");
+            say!("pull", "{}", ui::warn(&format!("would commit {dirty} change(s) first: {message}")));
         } else {
             match commit_all(root, &message) {
-                Ok(true) => println!("[pull] committed {dirty} local change(s) first"),
+                Ok(true) => say!("pull", "committed {dirty} local change(s) first"),
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("[pull] commit failed: {e}");
+                    refuse!("pull", "commit failed: {e}");
                     return 1;
                 }
             }
@@ -785,17 +798,17 @@ pub fn pull(root: &Path, dry: bool) -> i32 {
     }
     if !git_ok(root, &["rev-parse", "--abbrev-ref", "@{u}"]) {
         if !has_origin(root) {
-            println!("[pull] no upstream, nothing to pull");
+            say!("pull", "{}", ui::ok("no upstream, nothing to pull"));
             return 0;
         }
         if dry {
-            println!("[pull] would fetch origin and follow its branch");
+            say!("pull", "{}", ui::warn("would fetch origin and follow its branch"));
             return 0;
         }
         match git(root, &["fetch", "origin"]) {
             Some(o) if o.status.success() => {}
             Some(o) => {
-                eprintln!("[pull] fetch failed: {}", git_err(&o));
+                refuse!("pull", "fetch failed: {}", git_err(&o));
                 return 1;
             }
             None => return 1,
@@ -803,28 +816,29 @@ pub fn pull(root: &Path, dry: bool) -> i32 {
         let remote = match remote_branch(root) {
             Ok(name) => name,
             Err(e) => {
-                eprintln!("[pull] {e}");
+                refuse!("pull", "{e}");
                 return 1;
             }
         };
         match git(root, &["branch", &format!("--set-upstream-to={remote}")]) {
-            Some(o) if o.status.success() => println!("[pull] following {remote}"),
+            Some(o) if o.status.success() => say!("pull", "following {remote}"),
             Some(o) => {
-                eprintln!("[pull] cannot follow {remote}: {}", git_err(&o));
+                refuse!("pull", "cannot follow {remote}: {}", git_err(&o));
                 return 1;
             }
             None => return 1,
         }
     }
     if dry {
-        println!("[pull] would pull --rebase --autostash");
+        say!("pull", "{}", ui::warn("would pull --rebase --autostash"));
         return 0;
     }
     let before = git_out(root, &["rev-parse", "HEAD"]);
     let out = git(root, &["pull", "--rebase", "--autostash"]);
     if has_conflict(root) {
-        eprintln!(
-            "[pull] conflict: resolve it by hand, then `git -C {} rebase --continue`",
+        refuse!(
+            "pull",
+            "conflict: resolve it by hand, then `git -C {} rebase --continue`",
             root.display()
         );
         return 1;
@@ -832,19 +846,23 @@ pub fn pull(root: &Path, dry: bool) -> i32 {
     match out {
         Some(o) if o.status.success() => {
             let after = git_out(root, &["rev-parse", "HEAD"]);
-            println!(
-                "[pull] {}",
-                if before == after { "up to date" } else { "updated" }
+            say!(
+                "pull",
+                "{}",
+                match before == after {
+                    true => ui::ok("up to date"),
+                    false => ui::ok("updated"),
+                }
             );
-            println!("[pull] next: cfgsync render to write the new base into a source repo");
+            say!("pull", "{}", ui::dim("next: cfgsync render to write the new base into a source repo"));
             0
         }
         Some(o) => {
-            eprintln!("[pull] FAILED: {}", git_err(&o));
+            refuse!("pull", "FAILED: {}", git_err(&o));
             1
         }
         None => {
-            eprintln!("[pull] git is not on PATH");
+            refuse!("pull", "git is not on PATH");
             1
         }
     }

@@ -20,10 +20,10 @@ pub fn write(p: &Path, text: &str) {
     match std::fs::File::create(p) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(text.as_bytes()) {
-                eprintln!("[sync] warning: cannot write {}: {e}", p.display());
+                warn!("cannot write {}: {e}", p.display());
             }
         }
-        Err(e) => eprintln!("[sync] warning: cannot write {}: {e}", p.display()),
+        Err(e) => warn!("cannot write {}: {e}", p.display()),
     }
 }
 

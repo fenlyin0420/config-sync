@@ -111,6 +111,33 @@ central repo; the default is `~/.local/share/cfgsync` on linux,
 `~/Library/Application Support/cfgsync` on macOS, `%APPDATA%\cfgsync` on
 Windows.
 
+## Output
+
+One line per fact, `[command]` in front, and the files of a repo printed as an
+indented block with one column for the path:
+
+```text
+[harvest] nvim  ~/.config/nvim
+  init.lua          2 shared -> base, 1 machine-owned -> platform/linux
+  base : runtimepath  = ~/.config/nvim
+  local : theme       = catppuccin
+  keymaps.lua       no changes
+[harvest] ~/.config/nvim: 1 harvested (0 adopted), 1 unchanged
+```
+
+`status` codes a file with one letter: `M` differs from what `render` would
+write, `+` is missing on disk, `?` is claimed by `adopt.rules` but has no base
+or share copy yet. `base` / `local` / `pin` / `prune` / `keep` label where a key
+went: shared baseline, this machine's overlay, copied out of the base, dropped
+from the overlay, or left to the app by a `!` line.
+
+Colour marks the structure only — the command tag, a status letter, a result
+word — never a path or a value, and it is off unless the stream is a terminal.
+`NO_COLOR=1` turns it off, `CLICOLOR` / `CLICOLOR_FORCE` are honored, and
+`CFGSYNC_COLOR=always|never` is the explicit answer, so it wins over all of
+them. `--dry-run` prints the same
+lines with `would` in place of what it did.
+
 ## Central repo layout
 
 One directory per source repo, named whatever you like — by default the
