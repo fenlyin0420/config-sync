@@ -23,6 +23,11 @@ directory.
 
 ## Install
 
+Prebuilt binaries for linux (x86_64 / aarch64), macOS (x86_64 / aarch64) and
+Windows x86_64 are attached to every [tagged release][releases].
+
+[releases]: https://github.com/fenlyin0420/config-sync/releases
+
 ```sh
 cargo build --release        # target/release/cfgsync
 cargo install --path .       # or put it on PATH
