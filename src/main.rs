@@ -21,6 +21,7 @@ mod fsx;
 mod paths;
 mod rules;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "\
@@ -42,6 +43,7 @@ usage:
   cfgsync harvest [NAME|DIR] [-a] [--os OS] [--dry-run]
   cfgsync render  [NAME|DIR] [-a] [--os OS] [--dry-run] [--force]
   cfgsync status  [NAME|DIR] [-a] [--os OS]
+  cfgsync cd
   cfgsync edit    -a|-s|-p [NAME|DIR]
   cfgsync push    [-m MESSAGE] [--dry-run]
   cfgsync pull    [--dry-run]
@@ -51,6 +53,11 @@ harvest / render / status work on the source repo the current directory is in,
 or on NAME|DIR; -a does it for every source repo this platform has a path for.
 edit -a opens adopt.rules (which files), -s sync.rules (which keys), -p
 path.rules (where the app lives on each platform).
+
+cd goes to the central repo itself: the one directory that holds every app's
+base and overlay. On a terminal it prints the path and starts an interactive
+shell there (exit it to come back); with stdout redirected it prints the bare
+path only, so a shell function can cd to a command substitution of it.
 
 add records this platform's path in <name>/path.rules. The name defaults to the
 directory's own name; a name already standing for another directory on this
@@ -240,6 +247,17 @@ fn run(cli: Cli) -> i32 {
             }
             code
         }
+        "cd" => {
+            if cli.all || cli.positional.is_some() || cli.second.is_some() {
+                eprintln!("usage: cfgsync cd   (it goes to the central repo, no NAME|DIR)");
+                return 2;
+            }
+            if !root.is_dir() {
+                eprintln!("[cd] no central repo at {} -- run `cfgsync init`", root.display());
+                return 2;
+            }
+            enter(&root)
+        }
         "edit" => {
             let which = match (cli.all, cli.sync_rules, cli.path_rules) {
                 (true, false, false) => engine::RulesFile::Adopt,
@@ -419,6 +437,35 @@ fn reachable(
                 None
             }
         },
+    }
+}
+
+/// Where `cd` lands: a terminal gets an interactive shell in `path`, anything
+/// else gets the path itself on stdout, because a child process cannot change
+/// its parent's directory.
+fn enter(path: &Path) -> i32 {
+    if !std::io::stdout().is_terminal() {
+        println!("{}", path.display());
+        return 0;
+    }
+    println!("[cd] {}", path.display());
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "cmd.exe".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        });
+    println!("[cd] {shell} here -- leave it to come back");
+    match std::process::Command::new(&shell).current_dir(path).status() {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("[sync] error: cannot start {shell}: {e}");
+            1
+        }
     }
 }
 

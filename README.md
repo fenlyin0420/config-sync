@@ -65,6 +65,7 @@ Day to day, from inside a source repo:
 
 ```sh
 cfgsync status     # what differs from the central copy
+cfgsync cd         # jump to the central repo (~/.local/share/cfgsync)
 cfgsync harvest    # after editing the app's file by hand
 cfgsync render     # write the central copy back (refuses if unharvested edits exist)
 cfgsync pull       # other machines' changes
@@ -81,6 +82,7 @@ cfgsync push       # this machine's changes
 | `harvest [NAME\|DIR] [-a]` | split the source repo into base + overlay, record the content hash, commit the source repo |
 | `render [NAME\|DIR] [-a] [--force]` | write base + overlay into the source repo, record the hash, commit the source repo |
 | `status [NAME\|DIR] [-a]` | compare the source repo with what `render` would write |
+| `cd` | go to the central repo itself, the one directory holding every app's base and overlay |
 | `edit -a` / `-s` / `-p` | open `adopt.rules` / `sync.rules` / `path.rules` in `$VISUAL` / `$EDITOR` |
 | `push [-m MESSAGE]` | commit the central repo if dirty, then push |
 | `pull` | commit the central repo if dirty, then `git pull --rebase --autostash` |
@@ -91,6 +93,15 @@ is in — including any subdirectory of it — or on a repo named by its central
 `NAME` or by its `DIR`; `-a` does it for every source repo this platform has a
 path for. `--dry-run` prints the same plan and writes
 nothing, not even the hash.
+
+`cd` takes no arguments: it goes to the central repo, the directory every app's
+`base/` and `platform/<os>/` lives in. A terminal gets the path and an
+interactive shell in it, so `exit` brings you back where you were; redirected
+stdout gets the bare path instead, for a shell function to `cd` into:
+
+```sh
+ccd() { cd "$(cfgsync cd)"; }   # ccd = where the configs are kept
+```
 
 Exit codes: `0` ok, `1` refused (the hash guard, a git failure), `2` usage or
 I/O. `--help` / `--version` print to stdout and exit `0`.
