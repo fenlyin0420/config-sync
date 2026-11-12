@@ -291,7 +291,7 @@ pub fn commit_all(dir: &Path, message: &str) -> Result<bool, String> {
     match git(dir, &["commit", "-m", message]) {
         Some(o) if o.status.success() => Ok(true),
         Some(o) => Err(git_err(&o)),
-        None => return Err("git is not on PATH".to_string()),
+        None => Err("git is not on PATH".to_string()),
     }
 }
 

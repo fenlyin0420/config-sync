@@ -173,7 +173,7 @@ impl super::Adapter for PlainAdapter {
             }
         }
         let live: std::collections::HashSet<&String> = cur.iter().map(|e| &e.path).collect();
-        for (path, _) in &base {
+        for path in base.keys() {
             if !live.contains(path) {
                 let (key, _) = split_ordinal(path);
                 ops.push(delete_op(path, key));
