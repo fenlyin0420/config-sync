@@ -245,6 +245,39 @@ fn rm_drops_the_central_copy_and_leaves_the_source_alone() {
 }
 
 #[test]
+fn a_file_the_adapter_cannot_read_is_carried_whole() {
+    // rime's `*.dict.yaml` is `.yaml` by name and tab separated in practice:
+    // the adapter must not freeze it, it has to reach every machine anyway
+    let f = Fixture::new("carried-whole");
+    let dict = "---\nname: demo\nversion: \"1\"\n...\n\n\u{4f60}\tni\t1\n";
+    f.write("app/demo.dict.yaml", dict);
+    f.ok(&["init"]);
+    f.ok(&["add", "app"]);
+    let repo = f.repo("app");
+    f.write(&format!("{repo}/adopt.rules"), "demo.dict.yaml\n");
+    f.ok_in("app", &["harvest"]);
+    assert_eq!(
+        f.read(&format!("{repo}/base/demo.dict.base.yaml")),
+        dict,
+        "adopted byte for byte"
+    );
+
+    // a fresh machine has no such file: render writes the bytes back
+    std::fs::remove_file(f.root.join("app/demo.dict.yaml")).unwrap();
+    let out = f.ok_in("app", &["render"]);
+    assert!(out.contains("carried whole"), "{out}");
+    assert_eq!(f.read("app/demo.dict.yaml"), dict);
+
+    // and an edit on this machine goes back into the base whole
+    f.write("app/demo.dict.yaml", "---\nname: demo\n...\n\n\u{4f60}\tni\t2\n");
+    let out = f.ok_in("app", &["harvest"]);
+    assert!(out.contains("carried whole"), "{out}");
+    assert!(f
+        .read(&format!("{repo}/base/demo.dict.base.yaml"))
+        .contains("\t2"));
+}
+
+#[test]
 fn add_records_the_platform_path_in_path_rules() {
     let f = Fixture::new("add-path");
     f.write("app/config.ini", "[core]\neditor = vim\n");

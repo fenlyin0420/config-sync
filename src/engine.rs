@@ -577,13 +577,38 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         }
         let base_text = read(&it.base);
         if !ad.parses(&base_text) {
-            eprintln!(
-                "[sync] warning: {} is not valid for the .{} adapter -> leaving {} alone \
-                 until it is (or drop its adopt.rules line)",
+            // An adapter that cannot read the file is no adapter for it: the
+            // base holds the bytes exactly as they were adopted, so those are
+            // the bytes that belong in the source repo. Rime's `*.dict.yaml`
+            // is the case that matters -- `.yaml` by name, tab separated in
+            // practice, and it has to reach every machine all the same.
+            let actual = read(&it.target);
+            if actual == base_text {
+                kept += 1;
+                continue;
+            }
+            if !force && recorded.is_none() && !actual.trim().is_empty() {
+                eprintln!(
+                    "[sync] warning: {} cannot be split by the .{} adapter and differs from \
+                     {} -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render \
+                     --force` to overwrite it",
+                    it.rel,
+                    it.ext,
+                    central_rel(repo, &it.base)
+                );
+                blocked = true;
+                continue;
+            }
+            println!(
+                "[render] {}  <= {} (carried whole, the .{} adapter cannot read it)",
+                it.rel,
                 central_rel(repo, &it.base),
-                it.ext,
-                it.rel
+                it.ext
             );
+            written += 1;
+            if !dry {
+                write(&it.target, &base_text);
+            }
             continue;
         }
         let overlay_text = read(&it.overlay);
@@ -752,14 +777,32 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
                 continue;
             }
         } else {
-            if !ad.parses(&read(&it.base)) {
-                eprintln!(
-                    "[sync] warning: {} is not valid for the .{} adapter -> nothing \
-                     harvested from {}",
+            let base_text = read(&it.base);
+            if !ad.parses(&base_text) {
+                // carried whole: the source repo's bytes become the base, no
+                // key is split out of a file the adapter cannot read
+                if current.trim().is_empty() {
+                    eprintln!(
+                        "[harvest] {}: is empty -> refusing to harvest it (run \
+                         `cfgsync render` to rebuild it)",
+                        it.rel
+                    );
+                    continue;
+                }
+                if current == base_text {
+                    println!("[harvest] {}  <-  no changes", it.rel);
+                    continue;
+                }
+                println!(
+                    "[harvest] {}: carried whole -> {} (the .{} adapter cannot read it)",
+                    it.rel,
                     central_rel(repo, &it.base),
-                    it.ext,
-                    it.rel
+                    it.ext
                 );
+                harvested += 1;
+                if !dry {
+                    write(&it.base, &current);
+                }
                 continue;
             }
             if !ad.parses(&read(&it.overlay)) {
@@ -895,6 +938,25 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
             continue;
         }
         let base_text = read(&it.base);
+        if !ad.parses(&base_text) {
+            // carried whole: nothing to merge, compare the bytes
+            if !it.target.is_file() {
+                println!(
+                    "[status]   +  {}  (not on disk -- `cfgsync render` writes it)",
+                    it.rel
+                );
+                changed += 1;
+            } else if read(&it.target) != base_text {
+                println!(
+                    "[status]   M  {}  (differs from {}, which the .{} adapter carries whole)",
+                    it.rel,
+                    central_rel(repo, &it.base),
+                    it.ext
+                );
+                changed += 1;
+            }
+            continue;
+        }
         let overlay_text = read(&it.overlay);
         let merged = ad.apply(&base_text, &ad.overlay_ops(&overlay_text));
         let expected = keep_local(&pats, it, ad, &merged, &read(&it.target));
