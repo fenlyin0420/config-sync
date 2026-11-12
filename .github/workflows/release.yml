@@ -1,0 +1,97 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            slug: linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            slug: linux-aarch64
+            cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            slug: windows-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            slug: macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            slug: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      STAGING: cfgsync-${{ github.ref_name }}-${{ matrix.slug }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup target add "$TARGET"
+
+      - name: Install cross linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          var=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+          echo "$var=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${STAGING}.tar.gz"
+          mkdir -p "$STAGING"
+          cp "target/${TARGET}/release/cfgsync" "$STAGING/"
+          cp README.md "$STAGING/"
+          tar czf "$out" "$STAGING"
+          echo "ARCHIVE=$out" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = "${env:STAGING}.zip"
+          New-Item -ItemType Directory -Path $env:STAGING | Out-Null
+          Copy-Item "target/${env:TARGET}/release/cfgsync.exe" $env:STAGING
+          Copy-Item README.md $env:STAGING
+          Compress-Archive -Path $env:STAGING -DestinationPath $out
+          "ARCHIVE=$out" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
