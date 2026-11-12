@@ -1,6 +1,6 @@
 [package]
 name = "config-sync"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "config sync across machines through one central repo: shared base + per-machine overlay"
 license = "MIT"
