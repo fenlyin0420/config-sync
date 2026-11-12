@@ -4,7 +4,9 @@
 in sync across machines through **one central git repo**. Per app there is a
 committed shared **base** file, a per-platform **overlay** holding only this
 platform's keys, and the app's real **source repo** that `render` writes and
-`harvest` reads. README.md is the user manual; this file is for changing the
+`harvest` reads. The central directory is named by the user (`nvim`), not by a
+path: `path.rules` inside it maps each platform to that platform's real
+directory, because the same app lives at different paths on different systems. README.md is the user manual; this file is for changing the
 code.
 
 ## Commands
@@ -26,7 +28,8 @@ temp directory.
 | file | responsibility |
 | --- | --- |
 | `src/main.rs` | argv parsing (`parse`), `USAGE` text, dispatch, repo selection, exit codes |
-| `src/central.rs` | the central repo: location, name mangling, lookup, `.hash` / `.os`, platform resolution, git plumbing, `init` / `rm` / `push` / `pull` |
+| `src/central.rs` | the central repo: location, naming, lookup, `.hash` / `.os`, platform resolution, git plumbing, `init` / `rm` / `push` / `pull` |
+| `src/paths.rs` | `path.rules` parsing: per-platform real path, `~` / `$VAR` / `%VAR%` expansion, in-place rewrite |
 | `src/engine.rs` | discovery, the harvest/render plan, `harvest` / `render` / `status`, `add` / `edit` |
 | `src/fsx.rs` | `read` (BOM-trimmed), `write` (LF), `rel`, `walk` |
 | `src/adopt.rs` | `adopt.rules` parsing: gitignore-style allowlist of the managed files |
@@ -40,10 +43,11 @@ temp directory.
 | `src/formats/plain.rs` | extensionless `key = value` adapter (ghostty's `config`), duplicate keys addressed as `key#N` |
 
 The central repo (`~/.local/share/cfgsync`, overridable by `--central` /
-`CFGSYNC_CENTRAL`) holds one directory per source repo, named after the source's
-absolute path with every `/` replaced by `--`:
+`CFGSYNC_CENTRAL`) holds one directory per source repo, named by the user (the
+directory's own name by default, `add DIR NAME` for anything else):
 
 ```text
+<central>/<name>/path.rules                         where it lives, per platform
 <central>/<name>/adopt.rules                        which files are managed
 <central>/<name>/sync.rules                         which keys are machine-owned
 <central>/<name>/base/<stem>.base.<ext>             shared baseline
@@ -55,6 +59,14 @@ absolute path with every `/` replaced by `--`:
 
 A file with no extension keeps its name and grows the tag: `agent/config` maps
 to `base/agent/config.base` / `platform/<os>/agent/config.overlay`.
+
+`path.rules` holds one `os = path` line per platform (`linux = ~/.config/nvim`,
+`win = %LOCALAPPDATA%\nvim`), with `~`, `$VAR` and `%VAR%` expanded on read.
+`add` writes the line of the machine it runs on; another machine extends the
+same file by running `add <its path> <name>`. `render` / `harvest` / `status`
+resolve the source directory through it and refuse (exit 1) when this platform
+has no line or the directory is not there; `-a` skips such a repo with a
+warning, so a linux-only repo does not fail `render -a` on windows.
 
 Discovery: a source file is managed when `adopt.rules` claims it -- the union of
 the files on disk, the committed `base/` files and the `share/` copies, because
@@ -82,8 +94,15 @@ Data flow, both directions:
   a source repo holds app config and its own git history; nothing is generated
   behind the app's back, nothing gets gitignored, and the source repo is never
   modified except by `render` / `harvest` / `add` (git init).
-- **The directory name is the mapping.** `central::name_for` / `source_of` are
-  the only registry: do not add a file that has to be kept in step with them.
+- **`path.rules` is the mapping.** The directory name is a label the user picks,
+  so the source path may only come from `<name>/path.rules` -- never from the
+  name, never from a guess, never from an environment default. A platform with
+  no line there is an error, not a fallback to another platform's path.
+- **`add` is the only writer of a `path.rules` line**, and it writes only the
+  current platform's. It never overwrites a different path recorded for the same
+  platform (that is what `edit -p` is for), never creates a second central
+  directory for a source directory that is already managed, and suffixes a name
+  that is taken (`nvim` -> `nvim-2`) rather than reusing it for another path.
 - **`.hash` and `.os` are machine-local and gitignored.** A committed hash would
   make every other machine's `render` refuse. `init` is the only writer of
   `.gitignore`; keep it idempotent.
@@ -147,6 +166,8 @@ Data flow, both directions:
   platform must degrade to "base only + warning", never to a guess.
 - **`add` only takes directories** and never overwrites rules a pull brought in;
   `rm` only removes the central copy and never touches the source directory.
+  Both take a central name or a source path: a name has to keep working when the
+  path is not reachable from this machine.
 
 ## Adding a format
 

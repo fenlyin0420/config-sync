@@ -1,12 +1,11 @@
 //! The central repo (`~/.local/share/cfgsync` on linux): one git repo holding a
-//! directory per managed source repo, named after the source's absolute path
-//! with `/` replaced by `--`:
+//! directory per managed source repo. The directory name is a label the user
+//! picks (`nvim`, `ghostty`), because the same app does not live at the same
+//! path everywhere -- `~/.config/nvim` on linux, `%LOCALAPPDATA%\nvim` on
+//! windows -- and a path mangled into a name cannot express that. Per source
+//! repo:
 //!
-//!   /home/fenlyin/.config  ->  --home--fenlyin--.config
-//!
-//! The directory name *is* the mapping, so no registry file has to be kept in
-//! step with it. Per source repo:
-//!
+//!   <central>/<name>/path.rules                    where it lives per platform
 //!   <central>/<name>/adopt.rules                   which files are managed
 //!   <central>/<name>/sync.rules                    which keys are machine-owned
 //!   <central>/<name>/base/<stem>.base.<ext>        shared baseline
@@ -21,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::fsx::{read, write};
+use crate::paths;
 
 pub const ENV: &str = "CFGSYNC_CENTRAL";
 pub const HASH_FILE: &str = ".hash";
@@ -29,7 +29,7 @@ const GITIGNORE: &str = ".gitignore";
 const GITIGNORE_BLOCK: [&str; 2] = [HASH_FILE, OS_FILE];
 
 /// One managed source repo: its directory inside the central repo, and the
-/// directory on disk it stands for.
+/// directory on disk it stands for on the platform in use.
 #[derive(Clone, Debug)]
 pub struct Repo {
     pub name: String,
@@ -38,12 +38,16 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub fn new(root: &Path, name: &str) -> Repo {
+    pub fn new(root: &Path, name: &str, source: PathBuf) -> Repo {
         Repo {
             name: name.to_string(),
-            source: source_of(name),
+            source,
             dir: root.join(name),
         }
+    }
+
+    pub fn path_rules(&self) -> PathBuf {
+        self.dir.join(paths::NAME)
     }
 
     pub fn adopt_rules(&self) -> PathBuf {
@@ -52,6 +56,23 @@ impl Repo {
 
     pub fn sync_rules(&self) -> PathBuf {
         self.dir.join(crate::rules::NAME)
+    }
+}
+
+/// A directory of the central repo together with the source path `path.rules`
+/// gives for the platform in use. `source` is `None` when this platform has no
+/// line yet -- the repo is known but cannot be reached from here.
+#[derive(Clone, Debug)]
+pub struct Entry {
+    pub name: String,
+    pub dir: PathBuf,
+    pub source: Option<PathBuf>,
+}
+
+impl Entry {
+    /// `Some(dir)` when this platform has a path, with no promise it exists.
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
     }
 }
 
@@ -117,54 +138,176 @@ fn absolute(p: &Path) -> PathBuf {
 
 pub fn canonical(p: &Path) -> Option<PathBuf> {
     let abs = absolute(p);
-    abs.canonicalize().ok().filter(|p| p.is_dir())
+    abs.canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+        .map(unverbatim)
+}
+
+/// Windows `canonicalize` answers `\\?\C:\...`, which no other tool, no
+/// `path.rules` line and no comparison here wants to see.
+fn unverbatim(p: PathBuf) -> PathBuf {
+    let text = p.to_string_lossy().into_owned();
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+        None => match text.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => p,
+        },
+    }
 }
 
 // ---------------------------------------------------------------- naming
 
-/// An absolute path with every `/` turned into `--`: the directory name that
-/// stands for this source repo inside the central repo.
-pub fn name_for(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let text = text.trim_end_matches('/');
-    let text = if text.is_empty() { "/" } else { text };
-    text.replace('/', "--")
+/// The default directory name for a source repo: the directory's own name,
+/// cleaned up enough to be typed. `~/.claude` -> `claude`,
+/// `Application Support` -> `Application-Support`.
+pub fn suggest_name(source: &Path) -> String {
+    let raw = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned
+        .trim_start_matches(['.', '-', '_'])
+        .trim_end_matches('-')
+        .to_string();
+    if trimmed.is_empty() {
+        "repo".to_string()
+    } else {
+        trimmed
+    }
 }
 
-/// The inverse, for display only -- `--` never round-trips a path that already
-/// contains one, and nothing here depends on it doing so.
-pub fn source_of(name: &str) -> PathBuf {
-    PathBuf::from(name.replace("--", "/"))
+/// A name `add` accepts: one directory name, never a dot entry, never a path.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', ' ', '\t'])
+}
+
+/// The directory `add` may use for `source` on this platform.
+///
+/// `wanted` wins when it is free, or when it exists but has no line for this
+/// platform -- that case is how a second machine declares where the same app
+/// lives on its side. A name that already stands for another directory here is
+/// taken, so the next candidate is `wanted-2`, `wanted-3`, ...
+pub fn claim(root: &Path, source: &Path, os: &str, wanted: &str) -> Result<String, String> {
+    for n in 1..=50 {
+        let name = if n == 1 {
+            wanted.to_string()
+        } else {
+            format!("{wanted}-{n}")
+        };
+        let dir = root.join(&name);
+        if !dir.exists() {
+            return Ok(name);
+        }
+        if !dir.is_dir() {
+            return Err(format!("{} exists and is not a directory", dir.display()));
+        }
+        match paths::path_for(&dir, os) {
+            Some(path) if same_dir(&path, source) => return Ok(name),
+            Some(_) => continue,
+            None => return Ok(name),
+        }
+    }
+    Err(format!("no free name left for {wanted}"))
+}
+
+/// Two paths name the same directory, whatever their spelling.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    match (canonical(a), canonical(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => absolute(a) == absolute(b),
+    }
 }
 
 // ---------------------------------------------------------------- lookup
 
-/// The deepest ancestor of `start` (inclusive) that is a managed source repo.
-pub fn locate(root: &Path, start: &Path) -> Option<Repo> {
-    let mut cur = Some(canonical(start).unwrap_or_else(|| absolute(start)));
-    while let Some(dir) = cur {
-        let name = name_for(&dir);
-        if root.join(&name).is_dir() {
-            return Some(Repo::new(root, &name));
-        }
-        cur = dir.parent().map(Path::to_path_buf);
+/// The central directory `name`, with this platform's path filled in.
+pub fn entry(root: &Path, name: &str, os: &str) -> Entry {
+    let dir = root.join(name);
+    Entry {
+        name: name.to_string(),
+        source: paths::path_for(&dir, os),
+        dir,
     }
-    None
 }
 
-/// Every source repo the central repo knows about, sorted by name.
-pub fn all(root: &Path) -> Vec<Repo> {
-    let Ok(entries) = std::fs::read_dir(root) else {
+/// Every source repo the central repo knows about, sorted by name. A directory
+/// without `path.rules` is not one (old layout, or junk).
+pub fn entries(root: &Path, os: &str) -> Vec<Entry> {
+    let Ok(read) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = entries
+    let mut names: Vec<String> = read
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !n.starts_with('.'))
+        .filter(|n| root.join(n).join(paths::NAME).is_file())
         .collect();
     names.sort();
-    names.iter().map(|n| Repo::new(root, n)).collect()
+    names.iter().map(|n| entry(root, n, os)).collect()
+}
+
+/// Directories in the central repo that carry no `path.rules` -- the layout
+/// before names were labels, or junk. They are not source repos any more, but
+/// they are still committed history, so they are reported and never deleted.
+pub fn unconfigured(root: &Path) -> Vec<String> {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .filter(|n| !root.join(n).join(paths::NAME).is_file())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The deepest managed source repo that contains `start` (inclusive), looking
+/// only at the path this platform has recorded.
+pub fn entry_for_path(root: &Path, start: &Path, os: &str) -> Option<Entry> {
+    let start = canonical(start).unwrap_or_else(|| absolute(start));
+    let mut best: Option<(usize, Entry)> = None;
+    for e in entries(root, os) {
+        let Some(src) = e.source.clone() else {
+            continue;
+        };
+        let src = canonical(&src).unwrap_or(src);
+        if start != src && !start.starts_with(&src) {
+            continue;
+        }
+        let depth = src.components().count();
+        if best.as_ref().map(|(d, _)| depth > *d).unwrap_or(true) {
+            best = Some((depth, e));
+        }
+    }
+    best.map(|(_, e)| e)
+}
+
+/// A directory in the central repo by name, whether or not it has a path here.
+pub fn by_name(root: &Path, name: &str) -> Option<Entry> {
+    if !valid_name(name) || !root.join(name).is_dir() {
+        return None;
+    }
+    Some(entry(root, name, ""))
 }
 
 // ---------------------------------------------------------------- state
@@ -370,6 +513,7 @@ pub fn init(root: &Path, remote: Option<&str>, dry: bool) -> i32 {
     let os = host_os();
     write_os(root, &os);
     println!("[init] platform {os} recorded in {OS_FILE}");
+    println!("[init] each source repo records its own per-platform path in {}", paths::NAME);
     if let Some(url) = remote {
         let verb = if git_ok(root, &["remote", "get-url", "origin"]) {
             "set-url"
@@ -415,36 +559,30 @@ fn ensure_gitignore(root: &Path) -> Vec<&'static str> {
     added
 }
 
-pub fn remove(root: &Path, target: &str, dry: bool) -> i32 {
-    let name = match root.join(target) {
-        p if target != "." && target != ".." && p.is_dir() && !target.contains('/') => {
-            target.to_string()
-        }
-        _ => match canonical(Path::new(target)) {
-            Some(abs) => name_for(&abs),
-            None => {
+pub fn remove(root: &Path, target: &str, os: &str, dry: bool) -> i32 {
+    let entry = match by_name(root, target) {
+        Some(e) => entry(root, &e.name, os),
+        None => {
+            let Some(abs) = canonical(Path::new(target)) else {
                 eprintln!("[rm] no such directory: {target}");
                 return 2;
+            };
+            match entry_for_path(root, &abs, os) {
+                Some(e) => e,
+                None => {
+                    eprintln!("[rm] not managed: {target} (no source repo in {} has that path)", root.display());
+                    return 2;
+                }
             }
-        },
+        }
     };
-    if name.starts_with('.') || name == name_for(root) {
-        eprintln!("[rm] refusing to remove {name} from the central repo");
-        return 2;
-    }
-    let dir = root.join(&name);
-    if !dir.is_dir() {
-        eprintln!(
-            "[rm] not managed: {target} (no {} in the central repo)",
-            name
-        );
-        return 2;
-    }
-    println!(
-        "[rm] {} ({}): removed from the central repo",
-        source_of(&name).display(),
-        name
-    );
+    let name = entry.name.clone();
+    let dir = entry.dir.clone();
+    let shown = match entry.source() {
+        Some(path) => path.display().to_string(),
+        None => format!("{name} (no path for {os})"),
+    };
+    println!("[rm] {shown} ({name}): removed from the central repo");
     println!("[rm] the directory itself and its git history are untouched");
     if dry {
         return 0;
@@ -717,15 +855,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_names_round_trip() {
-        let p = Path::new("/home/fenlyin/.config");
-        assert_eq!(name_for(p), "--home--fenlyin--.config");
-        assert_eq!(source_of(&name_for(p)), p.to_path_buf());
+    fn a_suggested_name_is_the_directory_name_cleaned_up() {
+        assert_eq!(suggest_name(Path::new("/home/x/.config/nvim")), "nvim");
+        assert_eq!(suggest_name(Path::new("/home/x/.claude")), "claude");
+        assert_eq!(suggest_name(Path::new("/home/x/Application Support")), "Application-Support");
+        assert_eq!(suggest_name(Path::new("/")), "repo");
     }
 
     #[test]
-    fn a_name_is_never_a_dot_entry() {
-        assert!(!name_for(Path::new("/home/x")).starts_with('.'));
+    fn a_name_is_never_a_dot_entry_or_a_path() {
+        assert!(!suggest_name(Path::new("/home/x/.hidden")).starts_with('.'));
+        for bad in ["", ".", "..", ".git", "a/b", "a\\b", "a b"] {
+            assert!(!valid_name(bad), "{bad} should be rejected");
+        }
+        for good in ["nvim", "ghostty-config", "a.b", "x_1"] {
+            assert!(valid_name(good), "{good} should be accepted");
+        }
     }
 
     #[test]

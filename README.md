@@ -51,10 +51,13 @@ Another machine:
 ```sh
 cfgsync init --remote git@github.com:me/cfgsync.git
 cfgsync pull                              # fetch + check out the cloud branch
-cfgsync add ~/.config/nvim                # same path, same repo name
+cfgsync add %LOCALAPPDATA%\nvim nvim      # record this machine's path for `nvim`
 cfgsync render                            # write base + overlay into it
 ```
 
+The second argument is the name the central repo already uses for that app: the
+same app lives at a different path on every platform, so `add` writes this
+machine's path into the repo's `path.rules` instead of creating a second one.
 `add` keeps the `adopt.rules` / `sync.rules` that came with the pull; it only
 creates them when the central repo has never seen this directory.
 
@@ -73,19 +76,20 @@ cfgsync push       # this machine's changes
 | command | what it does |
 | --- | --- |
 | `init [--central DIR] [--remote URL]` | create the central repo (`git init`, `.gitignore`, this platform), optionally set `origin` |
-| `add DIR` | register a directory as a source repo: create its directory in the central repo, write `adopt.rules` / `sync.rules`, `git init` it if needed |
-| `rm DIR` / `rm -- NAME` | drop a source repo from the central repo; the directory on disk and its history stay |
-| `harvest [DIR] [-a]` | split the source repo into base + overlay, record the content hash, commit the source repo |
-| `render [DIR] [-a] [--force]` | write base + overlay into the source repo, record the hash, commit the source repo |
-| `status [DIR] [-a]` | compare the source repo with what `render` would write |
-| `edit -a` / `edit -s` | open `adopt.rules` / `sync.rules` in `$VISUAL` / `$EDITOR` |
+| `add DIR [NAME]` | register a directory as a source repo: create `NAME` (default: the directory's own name) in the central repo, record this platform's path in its `path.rules`, write `adopt.rules` / `sync.rules`, `git init` it if needed |
+| `rm NAME` / `rm DIR` | drop a source repo from the central repo; the directory on disk and its history stay |
+| `harvest [NAME\|DIR] [-a]` | split the source repo into base + overlay, record the content hash, commit the source repo |
+| `render [NAME\|DIR] [-a] [--force]` | write base + overlay into the source repo, record the hash, commit the source repo |
+| `status [NAME\|DIR] [-a]` | compare the source repo with what `render` would write |
+| `edit -a` / `-s` / `-p` | open `adopt.rules` / `sync.rules` / `path.rules` in `$VISUAL` / `$EDITOR` |
 | `push [-m MESSAGE]` | commit the central repo if dirty, then push |
 | `pull` | commit the central repo if dirty, then `git pull --rebase --autostash` |
 | `adaptor` | list the file types that are split key by key (alias: `formats`) |
 
 `harvest`, `render` and `status` work on the source repo the current directory
-is in — including any subdirectory of it — or on `DIR`; `-a` does it for every
-source repo the central repo knows. `--dry-run` prints the same plan and writes
+is in — including any subdirectory of it — or on a repo named by its central
+`NAME` or by its `DIR`; `-a` does it for every source repo this platform has a
+path for. `--dry-run` prints the same plan and writes
 nothing, not even the hash.
 
 Exit codes: `0` ok, `1` refused (the hash guard, a git failure), `2` usage or
@@ -98,33 +102,58 @@ Windows.
 
 ## Central repo layout
 
-One directory per source repo, named after the source's absolute path with every
-`/` replaced by `--`:
+One directory per source repo, named whatever you like — by default the
+directory's own name (`nvim`, `ghostty`), and `add DIR NAME` picks another. The
+name is only a label: `path.rules` inside it holds the real path for each
+platform, because the same app does not live in the same place everywhere.
 
 ```text
 ~/.local/share/cfgsync/
 ├── .gitignore                              # .hash and .os: machine-local
 ├── .os                                     # this machine's platform
-├── --home-fenlyin--.config/
+├── nvim/
+│   ├── path.rules                          # linux = ~/.config/nvim, win = ...
 │   ├── adopt.rules                         # which files of it are managed
 │   ├── sync.rules                          # which keys are this platform's alone
-│   ├── base/config.base.ini                # shared baseline
-│   ├── platform/linux/config.overlay.ini   # this platform's delta
+│   ├── base/init.base.lua                  # shared baseline
+│   ├── platform/linux/init.overlay.lua     # this platform's delta
 │   ├── share/lua/keymaps.lua               # no adapter: verbatim, every platform
 │   └── .hash                               # content hash at the last harvest/render
-└── --home-fenlyin--.pi/
+└── ghostty/
     └── ...
 ```
 
-The directory name *is* the mapping between a source repo and its central
-directory, so no registry file has to be kept in step with it. `.hash` and `.os`
-are the only machine-local files and both are gitignored — a foreign hash would
-make every `render` refuse to write.
+`.hash` and `.os` are the only machine-local files and both are gitignored — a
+foreign hash would make every `render` refuse to write.
 
 Base files may sit in subdirectories: `ui/key.json` of the source repo maps to
 `base/ui/key.base.json` and `platform/<os>/ui/key.overlay.json`. A file with no
 extension keeps its name and grows the tag: `agent/config` becomes
 `base/agent/config.base` and `platform/<os>/agent/config.overlay`.
+
+## `path.rules`
+
+Where the app's directory is on each platform, one `os = path` line each. `add`
+writes the line for the machine it runs on; another machine adds its own line by
+running `cfgsync add <its path> <name>` — an existing name that has no line for
+this platform is extended, never duplicated into `name-2`.
+
+```text
+# '~' is the home directory; $VAR and %VAR% are read from the environment
+linux = ~/.config/nvim
+win   = %LOCALAPPDATA%\nvim
+macos = ~/.config/nvim
+```
+
+- `render`, `harvest` and `status` resolve the source directory through this
+  file. A platform with no line, or a line pointing at a directory that is not
+  there, is an error (`1`) rather than a guess; `-a` skips such a repo with a
+  warning, so a linux-only repo does not fail `render -a` on windows.
+- `cfgsync edit -p` opens it. Editing a path by hand is fine — this file is the
+  only place that mapping lives.
+- `add` names a repo after its directory; a name already standing for another
+  directory on this platform becomes `name-2`, `name-3`, … A directory that is
+  already managed keeps the name it has, whatever `add` was given.
 
 ## `adopt.rules`
 
@@ -223,8 +252,9 @@ Resolution order, first hit wins:
 4. the host platform
 
 Names are normalized: `windows`/`win32`/`msys`/`mingw`/`cygwin` → `win`,
-`darwin`/`osx` → `macos`. Overlays are only ever read from
-`platform/<os>/`, so a typo means "base only", never a guess at another
+`darwin`/`osx` → `macos`. Overlays are only ever read from `platform/<os>/`, and
+a repo reaches its directory only through that platform's `path.rules` line, so
+a typo in either place stops the command instead of guessing at another
 machine's settings.
 
 ## The harvest hash guard

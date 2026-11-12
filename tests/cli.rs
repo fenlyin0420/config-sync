@@ -30,10 +30,10 @@ impl Fixture {
         self.root.join("central")
     }
 
-    /// the directory name the central repo uses for `rel`
+    /// the directory name the central repo uses for `rel`: the source
+    /// directory's own name, unless `add` was given another one
     fn name_of(&self, rel: &str) -> String {
-        let abs = std::fs::canonicalize(self.root.join(rel)).unwrap();
-        abs.to_string_lossy().replace('/', "--")
+        rel.rsplit('/').next().unwrap().to_string()
     }
 
     /// `<central>/<name>` as a path relative to the fixture root
@@ -127,6 +127,12 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// the absolute path of `rel`, forward slashes, as path.rules stores it
+fn source_path(f: &Fixture, rel: &str) -> String {
+    let abs = std::fs::canonicalize(f.root.join(rel)).unwrap();
+    abs.to_string_lossy().replace('\\', "/")
 }
 
 /// an initialized central repo plus one source repo (`app`) that is added and
@@ -239,11 +245,123 @@ fn rm_drops_the_central_copy_and_leaves_the_source_alone() {
 }
 
 #[test]
-fn rm_accepts_the_mangled_name_after_a_double_dash() {
+fn add_records_the_platform_path_in_path_rules() {
+    let f = Fixture::new("add-path");
+    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.ok(&["init"]);
+    let out = f.ok(&["add", "app"]);
+    let repo = f.repo("app");
+    let os = f.read("central/.os").trim().to_string();
+    let rules = f.read(&format!("{repo}/path.rules"));
+    assert!(
+        rules.contains(&format!("{os} = {}", source_path(&f, "app"))),
+        "path.rules should hold this platform's path:\n{rules}"
+    );
+    assert!(out.contains("path.rules"), "{out}");
+}
+
+#[test]
+fn add_takes_a_custom_name_and_suffixes_a_taken_one() {
+    let f = Fixture::new("add-name");
+    f.write("one/app/config.ini", "[core]\neditor = vim\n")
+        .write("two/app/config.ini", "[core]\neditor = vi\n")
+        .write("three/other/config.ini", "[core]\neditor = nano\n");
+    f.ok(&["init"]);
+    f.ok_in("", &["add", "one/app", "nvim"]);
+    assert!(f.exists("central/nvim/path.rules"));
+    let out = f.ok_in("", &["add", "two/app", "nvim"]);
+    assert!(out.contains("nvim-2"), "{out}");
+    assert!(f.exists("central/nvim-2/path.rules"));
+    // no name at all: the directory's own name
+    f.ok_in("", &["add", "three/other"]);
+    assert!(f.exists("central/other/path.rules"));
+}
+
+#[test]
+fn adding_the_same_directory_twice_keeps_one_central_repo() {
+    let f = Fixture::new("add-twice");
+    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.ok(&["init"]);
+    f.ok(&["add", "app"]);
+    let out = f.ok_in("", &["add", "app", "other"]);
+    assert!(out.contains("already managed as app"), "{out}");
+    assert!(!f.exists("central/other"));
+}
+
+#[test]
+fn a_second_machine_adds_its_own_path_to_the_same_repo() {
+    // the same app lives somewhere else on windows: the second machine extends
+    // path.rules instead of creating a second central repo
+    let f = Fixture::new("second-machine");
+    f.write("linux/nvim/init.lua", "vim.o.number = true\n")
+        .write("win/nvim/init.lua", "vim.o.number = true\n");
+    f.ok(&["init"]);
+    f.ok_in("", &["add", "linux/nvim", "nvim"]);
+    f.ok_in("", &["add", "win/nvim", "nvim", "--os", "win"]);
+    let rules = f.read("central/nvim/path.rules");
+    assert!(rules.contains("linux = "), "{rules}");
+    assert!(rules.contains("win = "), "{rules}");
+    assert!(!f.exists("central/nvim-2"), "one repo, two platform paths");
+    // and each platform renders its own copy
+    f.ok_in("win/nvim", &["render", "--os", "win"]);
+    assert!(f.read("win/nvim/init.lua").contains("number"));
+}
+
+#[test]
+fn render_refuses_when_the_recorded_path_is_gone() {
+    let f = workspace("gone");
+    f.ok(&["harvest"]);
+    std::fs::remove_dir_all(f.root.join("app")).unwrap();
+    let out = f.run_in("", &["render", "app"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no such directory"), "{err}");
+    assert!(err.contains("path.rules"), "{err}");
+}
+
+#[test]
+fn all_skips_a_repo_that_has_no_path_for_this_platform() {
+    let f = workspace("all-skip");
+    let app = source_path(&f, "app");
+    f.write(
+        &format!("{}/path.rules", f.repo("app")),
+        &format!("plan9 = {app}\n"),
+    );
+    let out = f.run_in("", &["render", "-a"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no path for"), "{err}");
+    assert!(err.contains("skipped"), "{err}");
+}
+
+#[test]
+fn a_directory_without_path_rules_is_reported_not_used() {
+    let f = workspace("old-layout");
+    f.write(
+        "central/legacy/base/config.base.ini",
+        "[core]\neditor = vim\n",
+    );
+    let out = f.run_in("", &["status", "-a"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("legacy has no legacy/path.rules"), "{err}");
+    assert!(err.contains("cfgsync rm legacy"), "{err}");
+}
+
+#[test]
+fn a_command_takes_the_central_name_or_the_path() {
+    let f = workspace("name-arg");
+    f.ok(&["harvest"]);
+    let by_name = f.ok_in("", &["status", "app"]);
+    let by_path = f.ok_in("", &["status", &source_path(&f, "app")]);
+    assert!(by_name.contains("[status]"), "{by_name}");
+    assert!(by_path.contains("[status]"), "{by_path}");
+}
+
+#[test]
+fn rm_accepts_the_central_name_after_a_double_dash() {
     let f = workspace("rm-name");
     f.ok(&["harvest"]);
     let name = f.name_of("app");
-    assert!(name.starts_with("--"), "{name}");
     let out = f.ok_in("", &["rm", "--", &name]);
     assert!(out.contains("removed from the central repo"), "{out}");
     assert!(!f.exists(&format!("central/{name}")));
@@ -368,7 +486,7 @@ fn harvest_refuses_to_run_outside_a_managed_repo() {
     let out = f.run_in("", &["harvest"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not inside a managed source repo"),
+        String::from_utf8_lossy(&out.stderr).contains("is not a managed source repo"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -689,6 +807,14 @@ fn render_writes_a_pulled_base_for_a_file_this_machine_never_had() {
 fn the_platform_overlay_is_selected_by_os() {
     let f = workspace("os");
     let repo = f.repo("app");
+    // every platform the test asks for needs its own line; a real second
+    // machine would have added it itself
+    let app = source_path(&f, "app");
+    let os = f.read("central/.os").trim().to_string();
+    f.write(
+        &format!("{repo}/path.rules"),
+        &format!("{os} = {app}\nwin = {app}\nplan9 = {app}\n"),
+    );
     f.write(
         &format!("{repo}/base/config.base.ini"),
         "[core]\neditor = vim\n",
@@ -954,12 +1080,15 @@ fn push_commits_the_central_repo_and_pushes_it() {
         .arg(&clone)
         .output()
         .unwrap();
-    let repo_dir = std::fs::read_dir(&clone)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .find(|e| e.file_name().to_string_lossy().starts_with("--"))
-        .expect("the mangled repo directory is in the cloud copy");
-    assert!(repo_dir.path().join("base/config.base.ini").is_file());
+    let repo_dir = clone.join(f.name_of("app"));
+    assert!(
+        repo_dir.join("base/config.base.ini").is_file(),
+        "the named repo directory is in the cloud copy"
+    );
+    assert!(
+        repo_dir.join("path.rules").is_file(),
+        "and so is the platform path"
+    );
 }
 
 #[test]

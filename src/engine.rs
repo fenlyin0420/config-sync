@@ -3,6 +3,7 @@
 //! A *source repo* is a real directory of an app's config files. The engine
 //! reads and writes it, and keeps everything sync-side in the central repo:
 //!
+//!   <central>/<name>/path.rules                      where it lives per platform
 //!   <central>/<name>/adopt.rules                     which files are managed
 //!   <central>/<name>/sync.rules                      which keys are machine-owned
 //!   <central>/<name>/base/<stem>.base.<ext>          shared baseline
@@ -22,6 +23,7 @@ use crate::adopt;
 use crate::central::{self, Repo};
 use crate::formats::{self, ext_of, Adapter, Kind, Op};
 use crate::fsx::{read, rel, walk, write};
+use crate::paths;
 use crate::rules::{self, Route};
 
 pub const RULES_TEMPLATE: &str = "\
@@ -929,7 +931,7 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
 
 // ---------------------------------------------------------------- add / edit
 
-pub fn add(root: &Path, arg: Option<&str>, os: &str, dry: bool) -> i32 {
+pub fn add(root: &Path, arg: Option<&str>, wanted: Option<&str>, os: &str, dry: bool) -> i32 {
     let raw = arg.unwrap_or(".");
     let owned = Path::new(raw);
     let absolute = if owned.is_absolute() {
@@ -939,18 +941,18 @@ pub fn add(root: &Path, arg: Option<&str>, os: &str, dry: bool) -> i32 {
             .map(|c| c.join(owned))
             .unwrap_or_else(|_| owned.to_path_buf())
     };
-    let Some(source) = absolute.canonicalize().ok() else {
-        eprintln!("[add] no such path: {raw}");
+    let Some(source) = central::canonical(&absolute) else {
+        if absolute.exists() {
+            eprintln!(
+                "[add] only directories are managed: {} -- add the directory that holds it, \
+                 then list the file there in adopt.rules",
+                absolute.display()
+            );
+        } else {
+            eprintln!("[add] no such path: {raw}");
+        }
         return 2;
     };
-    if !source.is_dir() {
-        eprintln!(
-            "[add] only directories are managed: {} -- add the directory that holds it, \
-             then list the file there in adopt.rules",
-            source.display()
-        );
-        return 2;
-    }
     if !root.is_dir() {
         eprintln!(
             "[add] no central repo at {} -- run `cfgsync init` first",
@@ -958,18 +960,49 @@ pub fn add(root: &Path, arg: Option<&str>, os: &str, dry: bool) -> i32 {
         );
         return 2;
     }
-    let name = central::name_for(&source);
+    let wanted = match wanted {
+        Some(name) => name.to_string(),
+        None => central::suggest_name(&source),
+    };
+    if !central::valid_name(&wanted) {
+        eprintln!(
+            "[add] not a usable central name: {wanted} -- one directory name, \
+             letters/digits/'.'/'_'/'-', not starting with '.'"
+        );
+        return 2;
+    }
+    let managed = central::entry_for_path(root, &source, os);
+    let name = match &managed {
+        Some(entry) => entry.name.clone(),
+        None => match central::claim(root, &source, os, &wanted) {
+            Ok(name) => name,
+            Err(problem) => {
+                eprintln!("[add] {problem}");
+                return 1;
+            }
+        },
+    };
+    if managed.is_some() && name != wanted {
+        println!("[add] already managed as {name}");
+    } else if managed.is_none() && name != wanted {
+        println!("[add] {wanted} already stands for another directory -> using {name}");
+    }
     let dir = root.join(&name);
     println!("[add] {} -> {}", source.display(), dir.display());
-    if let Some(parent) = source.parent().and_then(|p| central::locate(root, p)) {
-        if parent.source != source {
+    if let Some(parent) = source.parent().and_then(|p| central::entry_for_path(root, p, os)) {
+        if parent.source() != Some(source.as_path()) {
             eprintln!(
                 "[sync] warning: {} is inside the managed repo {} -> both will manage it",
                 source.display(),
-                parent.source.display()
+                parent.source().unwrap_or(&parent.dir).display()
             );
         }
     }
+    let line = format!("{os} = {}", paths::compact(&source));
+    if !dry {
+        paths::set(&dir, os, &source);
+    }
+    println!("[add] {name}/{}: {line}", paths::NAME);
     let adopt_rules = dir.join(adopt::NAME);
     let sync_rules = dir.join(rules::NAME);
     if adopt_rules.is_file() && sync_rules.is_file() {
@@ -1035,17 +1068,20 @@ fn candidates(source: &Path) -> Vec<String> {
 pub enum RulesFile {
     Adopt,
     Sync,
+    Path,
 }
 
 pub fn edit(repo: &Repo, which: RulesFile) -> i32 {
     let path = match which {
         RulesFile::Adopt => repo.adopt_rules(),
         RulesFile::Sync => repo.sync_rules(),
+        RulesFile::Path => repo.path_rules(),
     };
     if !path.is_file() {
         let text = match which {
             RulesFile::Adopt => adopt::template(&candidates(&repo.source)),
             RulesFile::Sync => RULES_TEMPLATE.to_string(),
+            RulesFile::Path => paths::template(),
         };
         write(&path, &text);
         println!("[edit] created {}", path.display());

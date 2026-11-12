@@ -4,7 +4,8 @@
 //! Three pieces, and every command moves between them:
 //!
 //!   central repo   `~/.local/share/cfgsync`, a git repo: one directory per
-//!                  source repo, holding base/, platform/<os>/ and the rules
+//!                  source repo, holding path.rules (where it lives on each
+//!                  platform), base/, platform/<os>/ and the other rules
 //!   source repo    a real config directory of an app, git-init'd by `add` so
 //!                  every harvest and render shows up in its own history
 //!   cloud repo     the central repo's git remote
@@ -17,6 +18,7 @@ mod central;
 mod engine;
 mod formats;
 mod fsx;
+mod paths;
 mod rules;
 
 use std::path::{Path, PathBuf};
@@ -26,29 +28,37 @@ cfgsync -- keep app config files in sync across machines through one central rep
 
 three pieces:
   central repo  ~/.local/share/cfgsync -- a git repo with one directory per
-                source repo (its absolute path with '/' -> '--'), holding
-                base/, platform/<os>/, adopt.rules, sync.rules
+                source repo, named by you (nvim, ghostty), holding path.rules
+                (where it lives on each platform), adopt.rules, sync.rules,
+                base/ and platform/<os>/
   source repo   a real config directory of an app; `add` git-inits it so every
                 harvest and render lands in its own history
   cloud repo    the central repo's git remote
 
 usage:
   cfgsync init    [--central DIR] [--remote URL] [--dry-run]
-  cfgsync add     DIR [--dry-run]
-  cfgsync rm      DIR|-- NAME [--dry-run]
-  cfgsync harvest [DIR] [-a] [--os OS] [--dry-run]
-  cfgsync render  [DIR] [-a] [--os OS] [--dry-run] [--force]
-  cfgsync status  [DIR] [-a] [--os OS]
-  cfgsync edit    -a|-s [DIR]
+  cfgsync add     DIR [NAME] [--dry-run]
+  cfgsync rm      NAME|DIR [--dry-run]
+  cfgsync harvest [NAME|DIR] [-a] [--os OS] [--dry-run]
+  cfgsync render  [NAME|DIR] [-a] [--os OS] [--dry-run] [--force]
+  cfgsync status  [NAME|DIR] [-a] [--os OS]
+  cfgsync edit    -a|-s|-p [NAME|DIR]
   cfgsync push    [-m MESSAGE] [--dry-run]
   cfgsync pull    [--dry-run]
   cfgsync adaptor            list the file types that are split key by key
 
 harvest / render / status work on the source repo the current directory is in,
-or on DIR; -a does it for every source repo the central repo knows.
-edit -a opens adopt.rules (which files), edit -s sync.rules (which keys).
+or on NAME|DIR; -a does it for every source repo this platform has a path for.
+edit -a opens adopt.rules (which files), -s sync.rules (which keys), -p
+path.rules (where the app lives on each platform).
+
+add records this platform's path in <name>/path.rules. The name defaults to the
+directory's own name; a name already standing for another directory on this
+platform gets a -2/-3 suffix. Passing an existing NAME adds this machine's path
+to that repo, which is how a second machine joins.
 
 layout of one source repo inside the central repo:
+  <name>/path.rules                      where it lives, per platform
   <name>/adopt.rules                     which files are managed
   <name>/sync.rules                      which keys are machine-owned
   <name>/base/<stem>.base.<ext>          shared baseline
@@ -68,10 +78,12 @@ struct Cli {
     remote: Option<String>,
     message: Option<String>,
     positional: Option<String>,
+    second: Option<String>,
     dry: bool,
     force: bool,
     all: bool,
     sync_rules: bool,
+    path_rules: bool,
 }
 
 /// `--flag=value` -> (`--flag`, Some("value")); the value may still be the next
@@ -97,6 +109,24 @@ fn take(
     }
 }
 
+/// The command word, then at most two arguments (`add DIR [NAME]`).
+fn take_positional(
+    cli: &mut Cli,
+    command: &mut Option<String>,
+    arg: &str,
+) -> Result<(), (String, i32)> {
+    if command.is_none() {
+        *command = Some(arg.to_string());
+    } else if cli.positional.is_none() {
+        cli.positional = Some(arg.to_string());
+    } else if cli.second.is_none() {
+        cli.second = Some(arg.to_string());
+    } else {
+        return Err((format!("unexpected argument: {arg}"), 2));
+    }
+    Ok(())
+}
+
 fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
     let mut cli = Cli {
         cmd: String::new(),
@@ -105,10 +135,12 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
         remote: None,
         message: None,
         positional: None,
+        second: None,
         dry: false,
         force: false,
         all: false,
         sync_rules: false,
+        path_rules: false,
     };
     let mut command: Option<String> = None;
     let mut it = argv.iter();
@@ -124,35 +156,21 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
             "--force" => cli.force = true,
             "-a" | "--all" => cli.all = true,
             "-s" | "--sync" => cli.sync_rules = true,
+            "-p" | "--path" => cli.path_rules = true,
             "--os" => cli.os = Some(take(&mut it, inline, "--os")?),
             "--central" => cli.central = Some(PathBuf::from(take(&mut it, inline, "--central")?)),
             "--remote" => cli.remote = Some(take(&mut it, inline, "--remote")?),
             "-m" | "--message" => cli.message = Some(take(&mut it, inline, "-m")?),
-            // POSIX end-of-flags: a repo directory is named `--home--user--...`,
-            // so `rm -- --home--user--.config` has to be spellable
+            // POSIX end-of-flags, for a directory or name that starts with '-'
             "--" => {
                 for rest in it.by_ref() {
-                    if command.is_none() {
-                        command = Some(rest.clone());
-                    } else if cli.positional.is_none() {
-                        cli.positional = Some(rest.clone());
-                    } else {
-                        return Err((format!("unexpected argument: {rest}"), 2));
-                    }
+                    take_positional(&mut cli, &mut command, rest)?;
                 }
             }
             _ if arg.starts_with('-') => {
                 return Err((format!("unknown flag: {arg}\n\n{USAGE}"), 2))
             }
-            _ => {
-                if command.is_none() {
-                    command = Some(arg.to_string());
-                } else if cli.positional.is_none() {
-                    cli.positional = Some(arg.to_string());
-                } else {
-                    return Err((format!("unexpected argument: {arg}"), 2));
-                }
-            }
+            _ => take_positional(&mut cli, &mut command, arg)?,
         }
     }
     cli.cmd = command.ok_or_else(|| (USAGE.to_string(), 0))?;
@@ -180,34 +198,36 @@ fn run(cli: Cli) -> i32 {
     let os = central::resolve_os(&root, cli.os.as_deref());
     match cli.cmd.as_str() {
         "init" => central::init(&root, cli.remote.as_deref(), cli.dry),
-        "add" => engine::add(&root, cli.positional.as_deref(), &os, cli.dry),
+        "add" => engine::add(
+            &root,
+            cli.positional.as_deref(),
+            cli.second.as_deref(),
+            &os,
+            cli.dry,
+        ),
         "rm" => match cli.positional.as_deref() {
-            Some(target) => central::remove(&root, target, cli.dry),
+            Some(target) => central::remove(&root, target, &os, cli.dry),
             None => {
                 eprintln!("usage: cfgsync rm NAME|DIR");
                 2
             }
         },
         "harvest" | "render" | "status" => {
-            let repos = match select(&root, &cli) {
-                Ok(repos) => repos,
+            let entries = match pick(&root, &cli, &os) {
+                Ok(entries) => entries,
                 Err(code) => return code,
             };
             let mut code = 0;
-            for repo in &repos {
-                if !repo.source.is_dir() {
-                    eprintln!(
-                        "[sync] warning: {} ({}): no such directory -> skipped",
-                        repo.source.display(),
-                        repo.name
-                    );
+            for entry in &entries {
+                let Some(source) = reachable(entry, &os, cli.all) else {
                     code = 1;
                     continue;
-                }
+                };
+                let repo = central::Repo::new(&root, &entry.name, source);
                 let result = match cli.cmd.as_str() {
-                    "harvest" => engine::harvest(repo, &os, cli.dry),
-                    "render" => engine::render(repo, &os, cli.dry, cli.force),
-                    _ => engine::status(repo, &os),
+                    "harvest" => engine::harvest(&repo, &os, cli.dry),
+                    "render" => engine::render(&repo, &os, cli.dry, cli.force),
+                    _ => engine::status(&repo, &os),
                 };
                 if result != 0 {
                     code = result;
@@ -216,21 +236,34 @@ fn run(cli: Cli) -> i32 {
             code
         }
         "edit" => {
-            let which = match (cli.all, cli.sync_rules) {
-                (true, false) => engine::RulesFile::Adopt,
-                (false, true) => engine::RulesFile::Sync,
+            let which = match (cli.all, cli.sync_rules, cli.path_rules) {
+                (true, false, false) => engine::RulesFile::Adopt,
+                (false, true, false) => engine::RulesFile::Sync,
+                (false, false, true) => engine::RulesFile::Path,
                 _ => {
-                    eprintln!("usage: cfgsync edit -a|--sync [DIR]\n  -a  adopt.rules\n  -s  sync.rules");
+                    eprintln!(
+                        "usage: cfgsync edit -a|-s|-p [NAME|DIR]\n  -a  adopt.rules\n  \
+                         -s  sync.rules\n  -p  path.rules"
+                    );
                     return 2;
                 }
             };
             // `-a` means adopt.rules here, never "every source repo": edit opens
             // the rules of the directory the command was started in
-            let repo = match locate_one(&root, &cli) {
-                Ok(repo) => repo,
+            let entry = match pick_one(&root, cli.positional.as_deref(), &os) {
+                Ok(entry) => entry,
                 Err(code) => return code,
             };
-            engine::edit(&repo, which)
+            let source = entry.source().map(Path::to_path_buf).unwrap_or_default();
+            if source.as_os_str().is_empty() && which != engine::RulesFile::Path {
+                eprintln!(
+                    "[sync] error: {} has no path for {os} -- `cfgsync add DIR {}` here, \
+                     or edit -p",
+                    entry.name, entry.name
+                );
+                return 1;
+            }
+            engine::edit(&central::Repo::new(&root, &entry.name, source), which)
         }
         "push" => central::push(&root, cli.message.as_deref(), cli.dry),
         "pull" => central::pull(&root, cli.dry),
@@ -255,40 +288,82 @@ fn run(cli: Cli) -> i32 {
     }
 }
 
-/// The source repos a command should act on: `-a` means every one the central
-/// repo knows, DIR means that directory, nothing means the current directory.
-fn select(root: &Path, cli: &Cli) -> Result<Vec<central::Repo>, i32> {
+/// The repos a command should act on, still unresolved: `-a` means every one
+/// the central repo knows, NAME|DIR means that one, nothing means the current
+/// directory.
+fn pick(root: &Path, cli: &Cli, os: &str) -> Result<Vec<central::Entry>, i32> {
     if cli.all {
-        let repos = central::all(root);
-        if repos.is_empty() {
+        for name in central::unconfigured(root) {
+            eprintln!(
+                "[sync] warning: {name} has no {}/{} (old layout?) -> `cfgsync rm {name}` \
+                 and `cfgsync add DIR {name}` again",
+                name,
+                paths::NAME
+            );
+        }
+        let entries = central::entries(root, os);
+        if entries.is_empty() {
             eprintln!(
                 "[sync] no source repos in {} -- `cfgsync add DIR` first",
                 root.display()
             );
             return Err(2);
         }
-        return Ok(repos);
+        return Ok(entries);
     }
-    Ok(vec![locate_one(root, cli)?])
+    Ok(vec![pick_one(root, cli.positional.as_deref(), os)?])
 }
 
-/// The one source repo a command reaches without `-a`: DIR, or the directory the
-/// command was started in, resolved to the deepest managed ancestor.
-fn locate_one(root: &Path, cli: &Cli) -> Result<central::Repo, i32> {
-    let start = match cli.positional.as_deref() {
+/// One repo, spelled as its central name, as a source path, or as nothing at
+/// all (the directory the command was started in).
+fn pick_one(root: &Path, arg: Option<&str>, os: &str) -> Result<central::Entry, i32> {
+    if let Some(name) = arg {
+        if let Some(entry) = central::by_name(root, name) {
+            return Ok(central::entry(root, &entry.name, os));
+        }
+    }
+    let start = match arg {
         Some(dir) => central::canonical(Path::new(dir)).unwrap_or_else(|| PathBuf::from(dir)),
         None => std::env::current_dir().unwrap_or_default(),
     };
-    match central::locate(root, &start) {
-        Some(repo) => Ok(repo),
+    match central::entry_for_path(root, &start, os) {
+        Some(entry) => Ok(entry),
         None => {
             eprintln!(
-                "[sync] {} is not inside a managed source repo -- `cfgsync add {}`, \
-                 or pass -a for all of them",
+                "[sync] {} is not a managed source repo -- `cfgsync add {}`, or pass -a for \
+                 all of them",
                 start.display(),
                 start.display()
             );
             Err(2)
         }
     }
+}
+
+/// The directory `entry` stands for on this platform. A missing line or a
+/// directory that is not there is fatal for a command that named the repo, and
+/// a skip for `-a`: a linux-only repo must not fail `render -a` on windows.
+fn reachable(entry: &central::Entry, os: &str, skip: bool) -> Option<PathBuf> {
+    let problem = match entry.source() {
+        None => format!(
+            "{}: no path for {os} in {}/{}, so this machine cannot reach it",
+            entry.name,
+            entry.name,
+            paths::NAME
+        ),
+        Some(path) if !path.is_dir() => format!(
+            "{}: no such directory: {} -- fix {}/{}",
+            entry.name,
+            path.display(),
+            entry.name,
+            paths::NAME
+        ),
+        Some(path) => return Some(path.to_path_buf()),
+    };
+    if skip {
+        eprintln!("[sync] warning: {problem} -> skipped");
+    } else {
+        eprintln!("[sync] error: {problem}");
+    }
+    None
 }
