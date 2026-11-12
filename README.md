@@ -146,9 +146,13 @@ macos = ~/.config/nvim
 ```
 
 - `render`, `harvest` and `status` resolve the source directory through this
-  file. A platform with no line, or a line pointing at a directory that is not
-  there, is an error (`1`) rather than a guess; `-a` skips such a repo with a
-  warning, so a linux-only repo does not fail `render -a` on windows.
+  file. A platform with no line is an error (`1`) rather than a guess, and `-a`
+  skips such a repo with a warning, so a linux-only repo does not fail
+  `render -a` on windows.
+- A directory that is not there yet does not stop `render`: the path is already
+  written down, so a first render on a fresh machine creates the directory and
+  puts the pulled base + overlay into it. `harvest` and `status` still refuse,
+  since they have nothing to read there.
 - `cfgsync edit -p` opens it. Editing a path by hand is fine — this file is the
   only place that mapping lives.
 - `add` names a repo after its directory; a name already standing for another
@@ -271,6 +275,10 @@ source repo in `<central>/<repo>/.hash`. Before writing, `render` recomputes it:
   would produce is left alone with a warning, and no record is written. A file
   that does not exist yet is simply written, so a fresh checkout renders
   normally.
+
+A repo with no managed file on disk at all — a fresh machine, or a directory
+`render` has just created from `path.rules` — has nothing to protect, so an
+outdated record does not block it either.
 
 A managed file that is not on disk contributes nothing to the fingerprint, so
 pulling a base for a file this machine never had does not invalidate the record.

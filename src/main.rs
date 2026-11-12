@@ -217,9 +217,14 @@ fn run(cli: Cli) -> i32 {
                 Ok(entries) => entries,
                 Err(code) => return code,
             };
+            let create = match (cli.cmd.as_str(), cli.dry) {
+                ("render", true) => Create::Plan,
+                ("render", false) => Create::Now,
+                _ => Create::Never,
+            };
             let mut code = 0;
             for entry in &entries {
-                let Some(source) = reachable(entry, &os, cli.all) else {
+                let Some(source) = reachable(entry, &os, cli.all, create) else {
                     code = 1;
                     continue;
                 };
@@ -340,30 +345,87 @@ fn pick_one(root: &Path, arg: Option<&str>, os: &str) -> Result<central::Entry, 
     }
 }
 
+/// Whether a missing source directory stops the command or gets created:
+/// `render` writes the config a fresh machine pulled, so a path that
+/// `path.rules` spells out is enough to create it -- `harvest` and `status`
+/// have nothing to read there and keep refusing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Create {
+    Never,
+    Now,
+    /// `--dry-run`: say what would happen, create nothing
+    Plan,
+}
+
 /// The directory `entry` stands for on this platform. A missing line or a
 /// directory that is not there is fatal for a command that named the repo, and
 /// a skip for `-a`: a linux-only repo must not fail `render -a` on windows.
-fn reachable(entry: &central::Entry, os: &str, skip: bool) -> Option<PathBuf> {
-    let problem = match entry.source() {
-        None => format!(
-            "{}: no path for {os} in {}/{}, so this machine cannot reach it",
-            entry.name,
-            entry.name,
-            paths::NAME
-        ),
-        Some(path) if !path.is_dir() => format!(
-            "{}: no such directory: {} -- fix {}/{}",
-            entry.name,
-            path.display(),
-            entry.name,
-            paths::NAME
-        ),
-        Some(path) => return Some(path.to_path_buf()),
+fn reachable(
+    entry: &central::Entry,
+    os: &str,
+    skip: bool,
+    create: Create,
+) -> Option<PathBuf> {
+    let Some(path) = entry.source().map(Path::to_path_buf) else {
+        report(
+            skip,
+            &format!(
+                "{}: no path for {os} in {}/{}, so this machine cannot reach it",
+                entry.name,
+                entry.name,
+                paths::NAME
+            ),
+        );
+        return None;
     };
+    if path.is_dir() {
+        return Some(path);
+    }
+    match create {
+        Create::Never => {
+            report(
+                skip,
+                &format!(
+                    "{}: no such directory: {} -- fix {}/{}",
+                    entry.name,
+                    path.display(),
+                    entry.name,
+                    paths::NAME
+                ),
+            );
+            None
+        }
+        Create::Plan => {
+            println!(
+                "[render] {}: not there yet -> would create it (from {}/{})",
+                path.display(),
+                entry.name,
+                paths::NAME
+            );
+            Some(path)
+        }
+        Create::Now => match std::fs::create_dir_all(&path) {
+            Ok(()) => {
+                println!(
+                    "[render] {}: not there yet -> created it (from {}/{})",
+                    path.display(),
+                    entry.name,
+                    paths::NAME
+                );
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("[sync] error: {}: cannot create {}: {e}", entry.name, path.display());
+                None
+            }
+        },
+    }
+}
+
+fn report(skip: bool, problem: &str) {
     if skip {
         eprintln!("[sync] warning: {problem} -> skipped");
     } else {
         eprintln!("[sync] error: {problem}");
     }
-    None
 }

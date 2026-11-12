@@ -308,15 +308,40 @@ fn a_second_machine_adds_its_own_path_to_the_same_repo() {
 }
 
 #[test]
-fn render_refuses_when_the_recorded_path_is_gone() {
+fn render_creates_the_directory_path_rules_spells_out() {
+    // a fresh machine: the app never ran, path.rules already says where it
+    // goes -> render builds the directory instead of refusing
     let f = workspace("gone");
     f.ok(&["harvest"]);
     std::fs::remove_dir_all(f.root.join("app")).unwrap();
-    let out = f.run_in("", &["render", "app"]);
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no such directory"), "{err}");
-    assert!(err.contains("path.rules"), "{err}");
+    let out = f.ok_in("", &["render", "app"]);
+    assert!(out.contains("not there yet -> created it"), "{out}");
+    assert!(f.read("app/config.ini").contains("editor = vim"));
+    assert!(f.read("app/settings.json").contains("packages"));
+}
+
+#[test]
+fn a_dry_run_says_it_would_create_the_directory_and_creates_nothing() {
+    let f = workspace("gone-dry");
+    f.ok(&["harvest"]);
+    std::fs::remove_dir_all(f.root.join("app")).unwrap();
+    let out = f.ok_in("", &["render", "app", "--dry-run"]);
+    assert!(out.contains("would create it"), "{out}");
+    assert!(!f.exists("app"), "the dry run wrote the directory");
+}
+
+#[test]
+fn harvest_and_status_still_refuse_a_directory_that_is_not_there() {
+    let f = workspace("gone-others");
+    f.ok(&["harvest"]);
+    std::fs::remove_dir_all(f.root.join("app")).unwrap();
+    for cmd in ["harvest", "status"] {
+        let out = f.run_in("", &[cmd, "app"]);
+        assert_eq!(out.status.code(), Some(1), "{cmd}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("no such directory"), "{cmd}: {err}");
+        assert!(err.contains("path.rules"), "{cmd}: {err}");
+    }
 }
 
 #[test]

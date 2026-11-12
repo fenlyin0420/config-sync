@@ -1,0 +1,1 @@
+- [config-sync-chezmoi](config-sync-chezmoi.md) — chezmoi 已弃用；dotfiles 归 cfgsync 中心仓库（每应用一目录 + path.rules 记各平台路径）

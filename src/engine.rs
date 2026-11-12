@@ -508,8 +508,12 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     let recorded = central::read_hash(&repo.dir);
     if !force {
         // nothing recorded -> first render into this source repo, decided per
-        // file below; a record that no longer matches means unharvested content
-        if let Some(h) = recorded {
+        // file below; a record that no longer matches means unharvested content.
+        // A repo with no managed file on disk (a fresh machine, or a directory
+        // `render` just created from path.rules) has nothing to overwrite, so
+        // the record of an older state does not block it.
+        let on_disk = items.iter().any(|it| it.target.exists());
+        if let Some(h) = recorded.filter(|_| on_disk) {
             if content_hash(&items) != h {
                 eprintln!(
                     "[render] {} changed since the last harvest -> refusing to write; \

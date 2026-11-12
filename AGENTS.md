@@ -64,9 +64,11 @@ to `base/agent/config.base` / `platform/<os>/agent/config.overlay`.
 `win = %LOCALAPPDATA%\nvim`), with `~`, `$VAR` and `%VAR%` expanded on read.
 `add` writes the line of the machine it runs on; another machine extends the
 same file by running `add <its path> <name>`. `render` / `harvest` / `status`
-resolve the source directory through it and refuse (exit 1) when this platform
-has no line or the directory is not there; `-a` skips such a repo with a
-warning, so a linux-only repo does not fail `render -a` on windows.
+resolve the source directory through it: no line for this platform is an error
+(exit 1), and `-a` skips such a repo with a warning, so a linux-only repo does
+not fail `render -a` on windows. A directory that is not there yet is only fatal
+for `harvest` / `status`; `render` creates it, because a configured path is the
+whole answer to "where does this go on this machine".
 
 Discovery: a source file is managed when `adopt.rules` claims it -- the union of
 the files on disk, the committed `base/` files and the `share/` copies, because
@@ -137,7 +139,9 @@ Data flow, both directions:
   `render` refuses (exit 1) when the recorded `.hash` no longer matches; with no
   record at all it leaves an existing file that differs from base + overlay
   alone and writes no record; `--force` is the documented escape hatch. Never
-  weaken this into "render always wins".
+  weaken this into "render always wins". The one carve-out: no managed file on
+  disk at all means nothing can be lost, so an outdated record does not block a
+  `render` that is purely creating them.
 - **Idempotency.** Rendering the same base + overlay twice must produce
   identical bytes, and a second harvest must write nothing new (no second commit
   either). The json adapter returning the base text when a merge changes nothing
