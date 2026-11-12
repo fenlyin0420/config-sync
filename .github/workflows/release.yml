@@ -32,6 +32,9 @@ jobs:
             target: x86_64-apple-darwin
             slug: macos-x86_64
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     env:
       TARGET: ${{ matrix.target }}
       STAGING: cfgsync-${{ github.ref_name }}-${{ matrix.slug }}
