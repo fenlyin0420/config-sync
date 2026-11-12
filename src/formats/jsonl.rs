@@ -200,7 +200,7 @@ impl super::Adapter for JsonlAdapter {
         let mut out = Vec::new();
         for line in &base {
             let mut leaves = Vec::new();
-            json::leaves(&line.value, &mut vec![key(line.n)], &mut leaves);
+            json::pin_leaves(&line.value, &mut vec![key(line.n)], &mut leaves);
             out.extend(
                 leaves
                     .into_iter()
@@ -277,7 +277,11 @@ mod tests {
     fn paths_name_the_line_and_the_key() {
         let ops = JsonlAdapter.pin_ops(DOC, &|_| true);
         let paths: Vec<String> = ops.into_iter().map(|o| o.path).collect();
-        assert_eq!(paths, vec!["line1.model", "line1.temp", "line2.model", "line2.deep.k"]);
+        // an owned list is pinned whole, like any other value of the record
+        assert_eq!(
+            paths,
+            vec!["line1.model", "line1.hosts", "line1.temp", "line2.model", "line2.deep.k"]
+        );
     }
 
     #[test]

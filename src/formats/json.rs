@@ -121,21 +121,24 @@ pub fn flat(base: &Value, cur: &Value, prefix: &mut Vec<String>, out: &mut Vec<(
 
 /// leaf paths only: objects are descended, arrays stay whole (they are managed
 /// as deltas, pinning a snapshot of one would block base additions)
-pub(crate) fn leaves(v: &Value, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
-    match v {
-        Value::Object(map) => {
-            for (k, child) in map {
-                prefix.push(k.clone());
-                leaves(child, prefix, out);
-                prefix.pop();
-            }
+/// What `pin_ops` walks: an owned key is pinned whole, so a list counts as one
+/// value here. `leaves` stops at lists because a diff patches them element by
+/// element, and a pin has no element to patch -- it copies the base's value out.
+pub(crate) fn pin_leaves(
+    v: &Value,
+    prefix: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, Value)>,
+) {
+    let Some(map) = v.as_object() else {
+        return;
+    };
+    for (k, child) in map {
+        prefix.push(k.clone());
+        match child {
+            Value::Object(_) => pin_leaves(child, prefix, out),
+            other => out.push((prefix.clone(), other.clone())),
         }
-        Value::Array(_) => {}
-        other => {
-            if !prefix.is_empty() {
-                out.push((prefix.clone(), other.clone()));
-            }
-        }
+        prefix.pop();
     }
 }
 
@@ -258,7 +261,7 @@ impl super::Adapter for JsonAdapter {
 
     fn pin_ops(&self, base_text: &str, owned: &dyn Fn(&str) -> bool) -> Vec<Op> {
         let mut flat = Vec::new();
-        leaves(&parse(base_text), &mut Vec::new(), &mut flat);
+        pin_leaves(&parse(base_text), &mut Vec::new(), &mut flat);
         flat.into_iter()
             .filter(|(p, _)| owned(&p.join(".")))
             .map(|(path, value)| Op {
