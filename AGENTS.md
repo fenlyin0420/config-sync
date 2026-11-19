@@ -154,7 +154,9 @@ Data flow, both directions:
   file no `adopt.rules` line claims must keep the "add it to adopt.rules"
   warning, a claimed file with no base must warn instead of being overwritten,
   and an overlay entry outside `sync.rules` must warn rather than be deleted
-  silently.
+  silently. Warnings are quiet by default but never silent: `warn!` counts them
+  and `ui::hidden()` prints the count line after the command, so a run without
+  `-v` still says something went unsaid.
 - **Conflicts and destructive git are the user's call.** `push` / `pull` may
   commit the central repo and rebase, but never resolve conflicts, never
   force-push, never discard work. `pull` reports conflicts and stops. On a
@@ -206,6 +208,10 @@ Data flow, both directions:
   tests assert on them. Every print goes through `ui` (`say!`, `warn!`,
   `fail!`, `note!`, `refuse!`), never a bare `println!`: that is what makes the
   tag, the color and the off-a-terminal case one decision instead of a hundred.
+- Warnings are output only under `-v` / `--verbose`, in place, at the step they
+  belong to; otherwise they are counted and one `N warnings held back` line
+  closes the run. Errors (`fail!` / `refuse!`) always print. This is why `warn!`
+  is a function call in `ui` and not an `eprintln!`.
 - Color marks structure only — the command tag, a status letter, an op label, a
   result word — never a path or a value, so stripping the escapes leaves the
   text readable. It is decided per stream from `is_terminal()`, with

@@ -42,13 +42,13 @@ usage:
   cfgsync init    [--central DIR] [--remote URL] [--dry-run]
   cfgsync add     DIR [NAME] [--dry-run]
   cfgsync rm      NAME|DIR [--dry-run]
-  cfgsync harvest [NAME|DIR] [-a] [--os OS] [--dry-run]
-  cfgsync render  [NAME|DIR] [-a] [--os OS] [--dry-run] [--force]
-  cfgsync status  [NAME|DIR] [-a] [--os OS]
+  cfgsync harvest [NAME|DIR] [-a] [--os OS] [--dry-run] [-v]
+  cfgsync render  [NAME|DIR] [-a] [--os OS] [--dry-run] [--force] [-v]
+  cfgsync status  [NAME|DIR] [-a] [--os OS] [-v]
   cfgsync cd
   cfgsync edit    -a|-s|-p [NAME|DIR]
-  cfgsync push    [-m MESSAGE] [--dry-run]
-  cfgsync pull    [--dry-run]
+  cfgsync push    [-m MESSAGE] [--dry-run] [-v]
+  cfgsync pull    [--dry-run] [-v]
   cfgsync adaptor            list the file types that are split key by key
 
 harvest / render / status work on the source repo the current directory is in,
@@ -60,6 +60,10 @@ cd goes to the central repo itself: the one directory that holds every app's
 base and overlay. On a terminal it prints the path and starts an interactive
 shell there (exit it to come back); with stdout redirected it prints the bare
 path only, so a shell function can cd to a command substitution of it.
+
+warnings stay out of the default output: a run that had any ends with one
+[sync] N warnings held back line on stderr, and -v (--verbose) prints each
+warning in place instead, at the step it belongs to. errors always print.
 
 add records this platform's path in <name>/path.rules. The name defaults to the
 directory's own name; a name already standing for another directory on this
@@ -94,6 +98,7 @@ struct Cli {
     dry: bool,
     force: bool,
     all: bool,
+    verbose: bool,
     sync_rules: bool,
     path_rules: bool,
 }
@@ -151,6 +156,7 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
         dry: false,
         force: false,
         all: false,
+        verbose: false,
         sync_rules: false,
         path_rules: false,
     };
@@ -167,6 +173,7 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
             "--dry-run" => cli.dry = true,
             "--force" => cli.force = true,
             "-a" | "--all" => cli.all = true,
+            "-v" | "--verbose" => cli.verbose = true,
             "-s" | "--sync" => cli.sync_rules = true,
             "-p" | "--path" => cli.path_rules = true,
             "--os" => cli.os = Some(take(&mut it, inline, "--os")?),
@@ -202,10 +209,13 @@ fn main() {
             std::process::exit(code);
         }
     };
-    std::process::exit(run(cli));
+    let code = run(cli);
+    ui::hidden();
+    std::process::exit(code);
 }
 
 fn run(cli: Cli) -> i32 {
+    ui::verbose(cli.verbose);
     let root = central::resolve(cli.central.as_deref());
     let os = central::resolve_os(&root, cli.os.as_deref());
     match cli.cmd.as_str() {

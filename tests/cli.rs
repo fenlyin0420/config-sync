@@ -385,7 +385,7 @@ fn all_skips_a_repo_that_has_no_path_for_this_platform() {
         &format!("{}/path.rules", f.repo("app")),
         &format!("plan9 = {app}\n"),
     );
-    let out = f.run_in("", &["render", "-a"]);
+    let out = f.run_in("", &["render", "-a", "-v"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no path for"), "{err}");
@@ -399,7 +399,7 @@ fn a_directory_without_path_rules_is_reported_not_used() {
         "central/legacy/base/config.base.ini",
         "[core]\neditor = vim\n",
     );
-    let out = f.run_in("", &["status", "-a"]);
+    let out = f.run_in("", &["status", "-a", "-v"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("legacy has no legacy/path.rules"), "{err}");
     assert!(err.contains("cfgsync rm legacy"), "{err}");
@@ -566,7 +566,7 @@ fn harvest_all_covers_every_source_repo() {
 fn harvest_warns_about_config_nobody_claims() {
     let f = workspace("unmanaged");
     f.write("app/extra.json", "{}\n");
-    let out = f.run(&["harvest"]);
+    let out = f.run(&["harvest", "-v"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("extra.json"), "{err}");
     assert!(err.contains("adopt.rules"), "{err}");
@@ -838,7 +838,7 @@ fn render_leaves_a_file_it_never_wrote_alone() {
         &format!("{repo}/base/config.base.ini"),
         "[core]\neditor = vim\n",
     );
-    let out = f.run_in("app", &["render"]);
+    let out = f.run_in("app", &["render", "-v"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no harvest record"), "{err}");
     assert!(f.read("app/config.ini").contains("nano"));

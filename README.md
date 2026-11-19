@@ -138,6 +138,11 @@ word — never a path or a value, and it is off unless the stream is a terminal.
 them. `--dry-run` prints the same
 lines with `would` in place of what it did.
 
+Warnings are not part of the default output: a run that had any ends with one
+`[sync] warning: N warnings held back` line on stderr, and `-v` (`--verbose`)
+prints each one where it happened instead. Errors always print, and a warning
+never changes an exit code.
+
 ## Central repo layout
 
 One directory per source repo, named whatever you like — by default the

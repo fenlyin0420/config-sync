@@ -11,6 +11,7 @@
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const RESET: &str = "\x1b[0m";
 
@@ -19,6 +20,11 @@ const CELL_MAX: usize = 44;
 
 static OUT: OnceLock<bool> = OnceLock::new();
 static ERR: OnceLock<bool> = OnceLock::new();
+
+/// `-v`: print each warning where it happens instead of counting it
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+/// warnings held back this run, for the one line `hidden` prints at the end
+static HIDDEN: AtomicUsize = AtomicUsize::new(0);
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -112,6 +118,36 @@ fn tag_err(cmd: &str, code: &str) -> String {
     paint(code, &format!("[{cmd}]"), err_on())
 }
 
+/// `-v` was given: warnings print as they happen
+pub fn verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+/// One warning line. Quiet unless `-v`: a warning is not a result, and a run
+/// of `harvest -a` would otherwise drown its own summary in caveats. What was
+/// held back is still reported, in one line, by `hidden`.
+pub fn warning(text: std::fmt::Arguments<'_>) {
+    if VERBOSE.load(Ordering::Relaxed) {
+        eprintln!("{} {text}", warn_tag());
+    } else {
+        HIDDEN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The single line that stands in for every warning `-v` would have shown.
+/// Printed once, after the command, so the count comes last and the reader
+/// knows the full output is not the whole story.
+pub fn hidden() {
+    match HIDDEN.swap(0, Ordering::Relaxed) {
+        0 => {}
+        n => eprintln!(
+            "{} {n} warning{} held back -- -v shows them where they happen",
+            warn_tag(),
+            if n == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 pub fn warn_tag() -> String {
     format!("{} {}", tag_err("sync", "1;33"), paint("33", "warning:", err_on()))
 }
@@ -139,10 +175,10 @@ macro_rules! say {
     };
 }
 
-/// stderr, `[sync] warning: ...`
+/// stderr, `[sync] warning: ...` -- held back to one count line unless `-v`
 macro_rules! warn {
     ($($arg:tt)*) => {
-        eprintln!("{} {}", $crate::ui::warn_tag(), format_args!($($arg)*))
+        $crate::ui::warning(format_args!($($arg)*))
     };
 }
 
