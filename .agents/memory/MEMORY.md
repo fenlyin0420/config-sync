@@ -1,2 +1,0 @@
-- [config-sync-chezmoi](config-sync-chezmoi.md) — chezmoi 已弃用；dotfiles 归 cfgsync 中心仓库（每应用一目录 + path.rules 记各平台路径）
-- [harvest-sync-warnings-verbose-only](harvest-sync-warnings-verbose-only.md) — harvest/sync CLI 默认不逐条打印 warning，只输出隐藏计数行，需 -v/--verbose 才原位显示
