@@ -32,6 +32,7 @@ temp directory.
 | `src/paths.rs` | `path.rules` parsing: per-platform real path, `~` / `$VAR` / `%VAR%` expansion, in-place rewrite |
 | `src/engine.rs` | discovery, the harvest/render plan, `harvest` / `render` / `status`, `add` / `edit` |
 | `src/fsx.rs` | `read` (BOM-trimmed), `write` (LF), `rel`, `walk` |
+| `src/update.rs` | `update`: reads the latest release, compares versions, downloads the target's raw asset and installs it over the running binary |
 | `src/ui.rs` | the palette: `say!` / `warn!` / `fail!` / `note!` / `refuse!`, `row`, `width`, tty + `NO_COLOR` detection |
 | `src/adopt.rs` | `adopt.rules` parsing: gitignore-style allowlist of the managed files |
 | `src/rules.rs` | `sync.rules` parsing and fnmatch-style glob matching |
@@ -157,6 +158,22 @@ Data flow, both directions:
   silently. Warnings are quiet by default but never silent: `warn!` counts them
   and `ui::hidden()` prints the count line after the command, so a run without
   `-v` still says something went unsaid.
+- **`update` is the only command that reaches the network, and the only one
+  that writes outside the central repo.** It replaces the binary that is
+  running -- `current_exe()`, staged next to it so the swap is a rename, with
+  the old file retired and deleted (`<name>.old` on windows, where a running
+  `.exe` cannot be deleted) -- and it never reads or writes a central or source
+  repo. The release asset it wants is the raw binary named
+  `cfgsync-<slug>[.exe]` (`linux-x86_64`, `macos-aarch64`, `windows-x86_64`);
+  the archives a release also carries are for a person to unpack. Renaming that
+  asset breaks `update`, so the workflow and `update::target_slug` move
+  together. A download is gated on a program header, never installed blind.
+  The tag comes from following `<base>/releases/latest` to
+  `/releases/tag/<tag>`, never from the API: 60 requests an hour per IP is a
+  limit a shared address hits, and a self-update that answers 403 is worse than
+  no self-update. No HTTP crate: `curl` is the downloader, and
+  `CFGSYNC_UPDATE_BASE` / `_TARGET` / `_EXE` exist so the tests can point it at
+  a local release instead -- nothing else reads them.
 - **Conflicts and destructive git are the user's call.** `push` / `pull` may
   commit the central repo and rebase, but never resolve conflicts, never
   force-push, never discard work. `pull` reports conflicts and stops. On a

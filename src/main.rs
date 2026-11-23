@@ -11,7 +11,8 @@
 //!   cloud repo     the central repo's git remote
 //!
 //! `harvest` reads a source repo into the central one, `render` writes it back,
-//! `push` / `pull` move the central repo to and from the cloud.
+//! `push` / `pull` move the central repo to and from the cloud, and `update`
+//! replaces the binary itself with the latest release.
 
 #[macro_use]
 mod ui;
@@ -22,6 +23,7 @@ mod formats;
 mod fsx;
 mod paths;
 mod rules;
+mod update;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -49,12 +51,23 @@ usage:
   cfgsync edit    -a|-s|-p [NAME|DIR]
   cfgsync push    [-m MESSAGE] [--dry-run] [-v]
   cfgsync pull    [--dry-run] [-v]
+  cfgsync update  [--check] [--force] [--dry-run]
   cfgsync adaptor            list the file types that are split key by key
 
 harvest / render / status work on the source repo the current directory is in,
 or on NAME|DIR; -a does it for every source repo this platform has a path for.
 edit -a opens adopt.rules (which files), -s sync.rules (which keys), -p
 path.rules (where the app lives on each platform).
+
+update replaces this binary with the latest release: it asks GitHub for the
+latest tag, compares it with the version of the binary that is running and, if
+the release is newer, downloads the asset built for this machine and puts it
+where the running binary is, so the old one is gone. --check only reports, and
+--force reinstalls the same version. It is only the binary: no central repo of
+yours is read or written, and nothing else on the machine is touched. The
+download goes through curl, and the tag comes from the release page rather than
+the API, so no token or rate limit stands in the way. A build from source has
+no prebuilt asset and no need to update this way.
 
 cd goes to the central repo itself: the one directory that holds every app's
 base and overlay. On a terminal it prints the path and starts an interactive
@@ -97,6 +110,7 @@ struct Cli {
     second: Option<String>,
     dry: bool,
     force: bool,
+    check: bool,
     all: bool,
     verbose: bool,
     sync_rules: bool,
@@ -155,6 +169,7 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
         second: None,
         dry: false,
         force: false,
+        check: false,
         all: false,
         verbose: false,
         sync_rules: false,
@@ -172,6 +187,7 @@ fn parse(argv: &[String]) -> Result<Cli, (String, i32)> {
             }
             "--dry-run" => cli.dry = true,
             "--force" => cli.force = true,
+            "--check" => cli.check = true,
             "-a" | "--all" => cli.all = true,
             "-v" | "--verbose" => cli.verbose = true,
             "-s" | "--sync" => cli.sync_rules = true,
@@ -301,6 +317,13 @@ fn run(cli: Cli) -> i32 {
                 return 1;
             }
             engine::edit(&central::Repo::new(&root, &entry.name, source), which)
+        }
+        "update" => {
+            if cli.all || cli.positional.is_some() || cli.second.is_some() {
+                eprintln!("usage: cfgsync update [--check] [--force] [--dry-run]");
+                return 2;
+            }
+            update::run(cli.dry, cli.force, cli.check)
         }
         "push" => central::push(&root, cli.message.as_deref(), cli.dry),
         "pull" => central::pull(&root, cli.dry),

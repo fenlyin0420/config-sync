@@ -33,6 +33,12 @@ cargo build --release        # target/release/cfgsync
 cargo install --path .       # or put it on PATH
 ```
 
+Keep a prebuilt binary current with `cfgsync update`: it asks GitHub for the
+latest release, and if that is newer than the binary that is running, it
+downloads the asset built for this machine and puts it in place of that binary
+— wherever it lives — so the old one is gone. `--check` only reports, `--force`
+reinstalls the same version.
+
 ## Quick start
 
 First machine:
@@ -86,6 +92,7 @@ cfgsync push       # this machine's changes
 | `edit -a` / `-s` / `-p` | open `adopt.rules` / `sync.rules` / `path.rules` in `$VISUAL` / `$EDITOR` |
 | `push [-m MESSAGE]` | commit the central repo if dirty, then push |
 | `pull` | commit the central repo if dirty, then `git pull --rebase --autostash` |
+| `update [--check] [--force]` | download the latest release and replace this binary with it; `--check` only reports whether there is one |
 | `adaptor` | list the file types that are split key by key (alias: `formats`) |
 
 `harvest`, `render` and `status` work on the source repo the current directory
@@ -103,8 +110,13 @@ stdout gets the bare path instead, for a shell function to `cd` into:
 ccd() { cd "$(cfgsync cd)"; }   # ccd = where the configs are kept
 ```
 
-Exit codes: `0` ok, `1` refused (the hash guard, a git failure), `2` usage or
-I/O. `--help` / `--version` print to stdout and exit `0`.
+`update` is the only command that reaches the network, and the only one that
+writes outside the central repo: it replaces the binary that is running and
+leaves every app's config, base and overlay alone. A build from source has no
+prebuilt asset, so `cargo install --path .` is how that one moves forward.
+
+Exit codes: `0` ok, `1` refused (the hash guard, a git failure, a release that
+will not download), `2` usage or I/O. `--help` / `--version` print to stdout and exit `0`.
 
 `--central DIR` (or `$CFGSYNC_CENTRAL`) points the whole tool at a different
 central repo; the default is `~/.local/share/cfgsync` on linux,

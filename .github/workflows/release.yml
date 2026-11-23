@@ -80,10 +80,27 @@ jobs:
           Compress-Archive -Path $env:STAGING -DestinationPath $out
           "ARCHIVE=$out" >> $env:GITHUB_ENV
 
+      # the archive is for a person to unpack; the raw binary is what
+      # `cfgsync update` downloads and drops over the running one
+      - name: Raw binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="cfgsync-${{ matrix.slug }}"
+          bin="target/${TARGET}/release/cfgsync"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            name="$name.exe"
+            bin="$bin.exe"
+          fi
+          cp "$bin" "$name"
+          echo "RAW=$name" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.RAW }}
 
   release:
     needs: build
