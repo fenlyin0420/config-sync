@@ -13,15 +13,17 @@ code.
 
 ```sh
 cargo build            # binary: target/debug/cfgsync
-cargo test             # unit tests + tests/cli.rs (spawns the real binary)
+cargo test             # unit tests + tests/cli/ (spawns the real binary)
 ```
 
 A release build (`cargo build --release`, `strip` + LTO) is what gets installed.
 
-`tests/cli.rs` needs `git` on `PATH` (it creates local bare remotes and real
+`tests/cli/` needs `git` on `PATH` (it creates local bare remotes and real
 commits in `std::env::temp_dir()`). No network, no test touches the user's real
 config, `$HOME` or a real central repo. Every test points `CFGSYNC_CENTRAL` at a
-temp directory.
+temp directory. The end-to-end tests are one module per command under
+`tests/cli/` (`support.rs` holds the fixture, `formats.rs` one case per adapter);
+a new case goes into the module of the command it exercises.
 
 ## Layout
 
@@ -55,7 +57,7 @@ directory's own name by default, `add DIR NAME` for anything else):
 <central>/<name>/base/<stem>.base.<ext>             shared baseline
 <central>/<name>/platform/<os>/<stem>.overlay.<ext> this platform's delta
 <central>/<name>/share/<rel>                        no adapter: verbatim, all platforms
-<central>/<name>/.hash                              content hash, last harvest/render
+<central>/<name>/.hash                              both sides of every managed file, last harvest/render
 <central>/.os                                       this machine's platform
 ```
 
@@ -107,9 +109,28 @@ Data flow, both directions:
   platform (that is what `edit -p` is for), never creates a second central
   directory for a source directory that is already managed, and suffixes a name
   that is taken (`nvim` -> `nvim-2`) rather than reusing it for another path.
-- **`.hash` and `.os` are machine-local and gitignored.** A committed hash would
-  make every other machine's `render` refuse. `init` is the only writer of
+- **`.hash` and `.os` are machine-local and gitignored.** A committed record
+  would make every other machine's `render` refuse. `init` is the only writer of
   `.gitignore`; keep it idempotent.
+- **`.hash` is per file, never one total.** One line per managed file holding
+  the fingerprint of the source copy and of the central copy (`base` + `overlay`,
+  or the `share/` copy). The pair is what makes a deletion readable: a file
+  missing on one side that the record still holds -- the other side unchanged
+  since -- was deleted on purpose. A single total hash cannot say which file
+  moved, so a deletion would be indistinguishable from a fresh checkout and the
+  only safe answer would be "delete nothing". A record written in the old
+  one-number form reads as empty, so an upgraded machine deletes nothing until
+  its next harvest.
+- **A deletion propagates, and only on the record's word.** `harvest` drops the
+  base, overlay and `share/` copy of a file deleted in the source repo (plus
+  whatever directories that empties); `render` deletes a source file whose
+  central copy is gone. Both require the record: without it the file was never
+  synced here and must be left alone (a fresh machine has no `.hash`, and
+  pruning on its behalf would wipe the central repo). `harvest` also leaves the
+  central copy alone when it changed since the last sync, and `render` relies on
+  its own guard, which already refused if anything here was edited. Deletions
+  commit in the source repo like any other change; in the central repo they stay
+  uncommitted until `push`, which is the recovery net.
 - **`adopt.rules` is authoritative for which files are managed.** No base file
   is read for a source file its rules do not claim, and the base walk may not
   bypass the check. Removing a rule leaves the committed base behind: warn about
@@ -130,20 +151,21 @@ Data flow, both directions:
   place. That is how a secret stays out of the pushed git history; never route an
   excluded key into base "because the base is the document".
 - **No overlay file until there is something to put in it.** `harvest` writes
-  `platform/<os>/<stem>.overlay.<ext>` only when a key was routed there (or the
-  file already exists and has to be rewritten / emptied). An empty overlay is
-  noise in the central repo, and a missing one reads exactly like an empty one.
+  `platform/<os>/<stem>.overlay.<ext>` only when a key was routed there, and
+  removes it when its last machine-owned key goes. An empty overlay is noise in
+  the central repo, and a missing one reads exactly like an empty one.
 - **A file the adapter cannot read is never rewritten.** `parses` gates `render`
   and `harvest`: adoption still copies the bytes into the base verbatim, but
   nothing overwrites the source file until it is readable, because a failed
   parse would otherwise be written back as an empty document.
-- **The hash guard is the only proof that a source file is ours to overwrite.**
-  `render` refuses (exit 1) when the recorded `.hash` no longer matches; with no
-  record at all it leaves an existing file that differs from base + overlay
-  alone and writes no record; `--force` is the documented escape hatch. Never
-  weaken this into "render always wins". The one carve-out: no managed file on
-  disk at all means nothing can be lost, so an outdated record does not block a
-  `render` that is purely creating them.
+- **The hash guard is the only proof that a source file is ours to overwrite or
+  delete.** `render` refuses (exit 1) when a file on disk no longer matches its
+  recorded fingerprint; with no record at all it leaves an existing file that
+  differs from base + overlay alone and writes no record; `--force` is the
+  documented escape hatch for overwriting. Never weaken this into "render always
+  wins". The one carve-out: no managed file on disk at all means nothing can be
+  lost, so an outdated record does not block a `render` that is purely creating
+  them.
 - **Idempotency.** Rendering the same base + overlay twice must produce
   identical bytes, and a second harvest must write nothing new (no second commit
   either). The json adapter returning the base text when a merge changes nothing
@@ -210,7 +232,7 @@ Data flow, both directions:
    `#N` suffix for the Nth occurrence; `rules::route` matches `keybind` against
    `keybind#2` so one line still covers the key.
 4. Add unit tests in the adapter module and at least one end-to-end case in
-   `tests/cli.rs` using the `workspace`-style fixture.
+   `tests/cli/formats.rs` using the `workspace`-style fixture.
 5. Update the format table in `README.md` and the `cfgsync adaptor` output. The
    extension alone makes files adoptable; `adopt.rules` decides which ones are,
    and a file with no adapter is carried whole in `share/` instead of skipped.

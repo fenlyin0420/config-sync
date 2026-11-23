@@ -85,8 +85,8 @@ cfgsync push       # this machine's changes
 | `init [--central DIR] [--remote URL]` | create the central repo (`git init`, `.gitignore`, this platform), optionally set `origin` |
 | `add DIR [NAME]` | register a directory as a source repo: create `NAME` (default: the directory's own name) in the central repo, record this platform's path in its `path.rules`, write `adopt.rules` / `sync.rules`, `git init` it if needed |
 | `rm NAME` / `rm DIR` | drop a source repo from the central repo; the directory on disk and its history stay |
-| `harvest [NAME\|DIR] [-a]` | split the source repo into base + overlay, record the content hash, commit the source repo |
-| `render [NAME\|DIR] [-a] [--force]` | write base + overlay into the source repo, record the hash, commit the source repo |
+| `harvest [NAME\|DIR] [-a]` | split the source repo into base + overlay, record what it saw, commit the source repo; a file deleted here is dropped from the central repo |
+| `render [NAME\|DIR] [-a] [--force]` | write base + overlay into the source repo, record what it saw, commit the source repo; a file deleted in the central repo is deleted here |
 | `status [NAME\|DIR] [-a]` | compare the source repo with what `render` would write |
 | `cd` | go to the central repo itself, the one directory holding every app's base and overlay |
 | `edit -a` / `-s` / `-p` | open `adopt.rules` / `sync.rules` / `path.rules` in `$VISUAL` / `$EDITOR` |
@@ -138,7 +138,8 @@ indented block with one column for the path:
 ```
 
 `status` codes a file with one letter: `M` differs from what `render` would
-write, `+` is missing on disk, `?` is claimed by `adopt.rules` but has no base
+write, `+` is missing on disk, `-` is a deletion waiting to travel (gone here, or
+gone from the central repo), `?` is claimed by `adopt.rules` but has no base
 or share copy yet. `base` / `local` / `pin` / `prune` / `keep` label where a key
 went: shared baseline, this machine's overlay, copied out of the base, dropped
 from the overlay, or left to the app by a `!` line.
@@ -173,13 +174,18 @@ platform, because the same app does not live in the same place everywhere.
 │   ├── base/init.base.lua                  # shared baseline
 │   ├── platform/linux/init.overlay.lua     # this platform's delta
 │   ├── share/lua/keymaps.lua               # no adapter: verbatim, every platform
-│   └── .hash                               # content hash at the last harvest/render
+│   └── .hash                               # fingerprints of both sides, last harvest/render
 └── ghostty/
     └── ...
 ```
 
 `.hash` and `.os` are the only machine-local files and both are gitignored — a
 foreign hash would make every `render` refuse to write.
+
+`.hash` is one line per managed file: the fingerprint of the source repo's copy
+and of the central copy (`<source>\t<central>\t<path>`). One total hash cannot
+say *which* file moved, and telling a deliberate deletion from "this machine
+never had the file" is the whole job of the record.
 
 Base files may sit in subdirectories: `ui/key.json` of the source repo maps to
 `base/ui/key.base.json` and `platform/<os>/ui/key.overlay.json`. A file with no
@@ -316,10 +322,37 @@ a repo reaches its directory only through that platform's `path.rules` line, so
 a typo in either place stops the command instead of guessing at another
 machine's settings.
 
-## The harvest hash guard
+## Deletions
 
-`harvest` and `render` both record a fingerprint of every managed file of the
-source repo in `<central>/<repo>/.hash`. Before writing, `render` recomputes it:
+Deleting propagates, in both directions, down to a single line.
+
+- Delete a line here → `harvest` drops it from the base (shared key) or from the
+  overlay (machine-owned key). Delete a whole file here → `harvest` drops its
+  base, its overlay and its `share/` copy, and the directories that leaves
+  empty.
+- Delete a line in the central repo → `render` drops it from the file. Delete a
+  file's base there → `render` deletes the file, `platform/<os>/` copy and all.
+  An overlay whose last machine-owned key is gone is deleted at the next
+  harvest, not left behind as an empty stub.
+
+Every deletion is decided per file against `.hash`, and only when that file's two
+sides still say what the last `harvest` / `render` left there: the source side
+for `render` to delete, the central side for `harvest` to prune. So a file this
+machine never synced is never deleted (`render` warns instead), a file whose
+local copy was edited after the fact makes `render` refuse, and a central copy
+that moved on since the last sync makes `harvest` leave the app's file alone.
+
+Recovery is git on both sides: the source repo's history has every `harvest` /
+`render` commit, and the central repo holds the deletion as an uncommitted change
+until the next `push`, so `git -C <central> checkout -- <path>` brings a pruned
+base back.
+
+## The harvest record
+
+`harvest` and `render` both record one line per managed file in
+`<central>/<repo>/.hash`: the fingerprint of the source repo's copy, the
+fingerprint of the central copy (`base` + `overlay`, or the `share/` copy), and
+the path. Before writing, `render` compares the source side:
 
 - **it matches** → write base + overlay into the source repo;
 - **it differs** → the source repo holds content nobody harvested yet, so
@@ -329,14 +362,14 @@ source repo in `<central>/<repo>/.hash`. Before writing, `render` recomputes it:
   file this machine already had) → a file that differs from what base + overlay
   would produce is left alone with a warning, and no record is written. A file
   that does not exist yet is simply written, so a fresh checkout renders
-  normally.
+  normally. Nothing is ever deleted on the strength of a record that is not
+  there.
 
 A repo with no managed file on disk at all — a fresh machine, or a directory
 `render` has just created from `path.rules` — has nothing to protect, so an
-outdated record does not block it either.
-
-A managed file that is not on disk contributes nothing to the fingerprint, so
-pulling a base for a file this machine never had does not invalidate the record.
+outdated record does not block it either. A file that is missing on one side
+keeps the fingerprint the record had for it, so the other side can still see the
+deletion instead of reading it as "never synced".
 
 `harvest` and `render` then run `git add -A && git commit` inside the source
 repo (`cfgsync: harvest` / `cfgsync: render`), which is what makes the app's own
@@ -439,10 +472,11 @@ not ask for would have to decide what to do with your unharvested edits.
 ## Development
 
 ```sh
-cargo test        # unit tests + end-to-end tests in tests/cli.rs
+cargo test        # unit tests + end-to-end tests in tests/cli/
 ```
 
-`tests/cli.rs` drives the built binary in throwaway temp directories and needs
-`git` on `PATH`. No network, nothing outside `std::env::temp_dir()`.
+`tests/cli/` drives the built binary in throwaway temp directories -- one
+module per command, plus `support` for the fixture -- and needs `git` on
+`PATH`. No network, nothing outside `std::env::temp_dir()`.
 
 License: MIT.

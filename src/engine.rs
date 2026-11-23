@@ -15,7 +15,7 @@
 //! app's back and nothing is gitignored: the source repo is a plain checkout
 //! whose own history records every harvest and render.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -227,39 +227,188 @@ fn warn_unmanaged(repo: &Repo) {
     }
 }
 
-// ---------------------------------------------------------------- hashing
+// ---------------------------------------------------------------- record
 
-/// Fingerprint of what the source repo holds right now: relative path plus
-/// bytes of every managed file that exists.
+/// What one managed file looked like on both sides at the last `harvest` /
+/// `render`: the fingerprint of the source repo's copy and of the central one.
+#[derive(Clone, Copy)]
+struct Seen {
+    source: u64,
+    central: u64,
+}
+
+/// Per-file fingerprints, `<central>/<name>/.hash`, one line per managed file.
 ///
-/// `harvest` and `render` record it in `<central>/<name>/.hash`; `render`
-/// refuses to write when the fingerprint no longer matches, because the
-/// difference is exactly the content nobody harvested yet. A managed file that
-/// is not on disk contributes nothing, so pulling a base for a file this
-/// machine never had does not invalidate the record. A file with no adapter is
-/// hashed as raw bytes, because it is copied verbatim.
-pub fn content_hash(items: &[Item]) -> u64 {
+/// The pair is what makes a deletion readable. A file missing on one side that
+/// the record still holds -- while the other side has not moved since -- was
+/// deleted on purpose, so the deletion propagates. A file the record does not
+/// know was never synced on this machine (a fresh checkout), and nothing about
+/// it may be removed. One total hash cannot tell those two apart, which is why
+/// the record is per file.
+#[derive(Default)]
+struct Record {
+    map: BTreeMap<String, Seen>,
+}
+
+fn fnv(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for it in items {
-        if !it.target.is_file() {
-            continue;
-        }
-        fnv_feed(&mut h, it.rel.as_bytes());
-        fnv_feed(&mut h, b"\0");
-        match it.ad {
-            Some(_) => fnv_feed(&mut h, read(&it.target).as_bytes()),
-            None => fnv_feed(&mut h, &std::fs::read(&it.target).unwrap_or_default()),
-        }
-        fnv_feed(&mut h, b"\n");
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
 }
 
-fn fnv_feed(h: &mut u64, bytes: &[u8]) {
-    for b in bytes {
-        *h ^= u64::from(*b);
-        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+/// Fingerprint of one file's bytes; `None` when it is not there.
+fn digest(path: &Path) -> Option<u64> {
+    std::fs::read(path).ok().map(|b| fnv(&b))
+}
+
+/// This machine's copy of a managed file.
+fn source_digest(it: &Item) -> Option<u64> {
+    it.target.is_file().then(|| digest(&it.target)).flatten()
+}
+
+/// The central copy of a managed file: base + overlay for a file an adapter
+/// splits, the verbatim `share/` copy otherwise. `None` when the document
+/// itself -- the base, or the share copy -- is gone.
+fn central_digest(it: &Item) -> Option<u64> {
+    match it.ad {
+        Some(_) => it.base.is_file().then(|| {
+            let mut bytes = std::fs::read(&it.base).unwrap_or_default();
+            bytes.push(0);
+            bytes.extend(std::fs::read(&it.overlay).unwrap_or_default());
+            fnv(&bytes)
+        }),
+        None => digest(&it.copy),
     }
+}
+
+/// Is there a central copy `render` could write from?
+fn central_present(it: &Item) -> bool {
+    match it.ad {
+        Some(_) => it.base.is_file(),
+        None => it.copy.is_file(),
+    }
+}
+
+/// Any central artefact of a managed file at all -- base, overlay or `share/`
+/// copy -- so a half-pruned file is still cleaned up.
+fn central_any(it: &Item) -> bool {
+    it.base.is_file() || it.overlay.is_file() || it.copy.is_file()
+}
+
+impl Record {
+    fn load(dir: &Path) -> Record {
+        let text = read(&dir.join(central::HASH_FILE));
+        let mut map = BTreeMap::new();
+        for line in text.lines() {
+            let Some((source, rest)) = line.split_once('\t') else {
+                continue;
+            };
+            let Some((central, rel)) = rest.split_once('\t') else {
+                continue;
+            };
+            let (Ok(source), Ok(central)) = (
+                u64::from_str_radix(source, 16),
+                u64::from_str_radix(central, 16),
+            ) else {
+                continue;
+            };
+            if !rel.is_empty() {
+                map.insert(rel.to_string(), Seen { source, central });
+            }
+        }
+        Record { map }
+    }
+
+    fn save(dir: &Path, record: &Record) {
+        let mut text = String::new();
+        for (rel, seen) in &record.map {
+            text.push_str(&format!("{:016x}\t{:016x}\t{rel}\n", seen.source, seen.central));
+        }
+        write(&dir.join(central::HASH_FILE), &text);
+    }
+
+    fn get(&self, rel: &str) -> Option<Seen> {
+        self.map.get(rel).copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Does the source repo hold something nobody harvested since the record
+    /// was written? A file the record does not know counts, because there is
+    /// no proof it is ours to overwrite.
+    fn differs(&self, items: &[Item]) -> bool {
+        items
+            .iter()
+            .any(|it| it.target.is_file() && self.get(&it.rel).map(|s| s.source) != source_digest(it))
+    }
+}
+
+/// The record to write after this run: everything this machine has now seen on
+/// both sides. A side that is missing keeps the fingerprint the last record had
+/// for it, so a deletion stays readable until the other side catches up with
+/// it -- and an entry both sides have lost drops out entirely.
+fn snapshot(items: &[Item], previous: &Record) -> Record {
+    let mut next = Record::default();
+    for it in items {
+        let seen = match (source_digest(it), central_digest(it), previous.get(&it.rel)) {
+            (Some(source), Some(central), _) => Seen { source, central },
+            (Some(source), None, Some(p)) => Seen {
+                source,
+                central: p.central,
+            },
+            (None, Some(central), Some(p)) => Seen {
+                source: p.source,
+                central,
+            },
+            _ => continue,
+        };
+        next.map.insert(it.rel.clone(), seen);
+    }
+    next
+}
+
+/// Remove the directories a deletion emptied, up to but never including `root`.
+fn drop_empty_parents(path: &Path, root: &Path) {
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d == root || !d.starts_with(root) {
+            break;
+        }
+        let empty = std::fs::read_dir(d)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !empty || std::fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+}
+
+/// Drop a file's central copies -- base, overlay and `share/` -- after the
+/// source repo deleted it.
+fn prune_central(repo: &Repo, it: &Item, dry: bool) -> bool {
+    let mut done = true;
+    for path in [&it.base, &it.overlay, &it.copy] {
+        if path.as_os_str().is_empty() || !path.is_file() {
+            continue;
+        }
+        if dry {
+            continue;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => drop_empty_parents(path, &repo.dir),
+            Err(e) => {
+                warn!("cannot remove {}: {e}", central_rel(repo, path));
+                done = false;
+            }
+        }
+    }
+    done
 }
 
 // ---------------------------------------------------------------- plan
@@ -386,9 +535,9 @@ fn plan(
         .into_iter()
         .filter(|p| !kept.contains(p.as_str()))
         .collect();
-    // an overlay that carries nothing is not created; one that exists is
-    // rewritten even when it empties out, because dropping it is the prune
-    let overlay = (!local.is_empty() || it.overlay.is_file()).then_some(overlay);
+    // an overlay that carries nothing is not created, and one that just
+    // emptied out is deleted: a file exists only while it has a key in it
+    let overlay = (!local.is_empty()).then_some(overlay);
     let mut veto: Vec<String> = drops.iter().map(|op| op.path.clone()).collect();
     veto.extend(vetoed.iter().map(|op| op.path.clone()));
     veto.sort();
@@ -514,35 +663,57 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     let items = discover(repo, os);
     // one column width for the whole block, so the rows line up
     let width = ui::width(items.iter().map(|it| it.rel.as_str()));
-    let recorded = central::read_hash(&repo.dir);
+    let record = Record::load(&repo.dir);
     if !force {
         // nothing recorded -> first render into this source repo, decided per
-        // file below; a record that no longer matches means unharvested content.
-        // A repo with no managed file on disk (a fresh machine, or a directory
-        // `render` just created from path.rules) has nothing to overwrite, so
-        // the record of an older state does not block it.
+        // file below; a file that no longer matches the record means
+        // unharvested content. A repo with no managed file on disk (a fresh
+        // machine, or a directory `render` just created from path.rules) has
+        // nothing to overwrite, so an older record does not block it either.
         let on_disk = items.iter().any(|it| it.target.exists());
-        if let Some(h) = recorded.filter(|_| on_disk) {
-            if content_hash(&items) != h {
-                refuse!(
-                    "render",
-                    "{} changed since the last harvest -> refusing to write; run `cfgsync harvest` first, or `cfgsync render --force` to overwrite",
-                    repo.source.display()
-                );
-                return 1;
-            }
+        if on_disk && !record.is_empty() && record.differs(&items) {
+            refuse!(
+                "render",
+                "{} changed since the last harvest -> refusing to write; run `cfgsync harvest` first, or `cfgsync render --force` to overwrite",
+                repo.source.display()
+            );
+            return 1;
         }
     }
     let pats = rules::load(&repo.sync_rules());
     let mut written = 0usize;
+    let mut deleted = 0usize;
     let mut kept = 0usize;
     let mut blocked = false;
     for it in &items {
-        let Some(ad) = it.ad else {
-            if !it.copy.is_file() {
-                warn!("{} is claimed by adopt.rules but has no share copy yet -> run `cfgsync harvest` to adopt it", it.rel);
-                continue;
+        // adopt.rules still claims the file, but the central copy is gone: it
+        // was deleted there, so this machine's copy goes with it. The guard
+        // above already proved nothing here was edited since the last sync, and
+        // the record is the proof this machine ever had the file -- without it
+        // the file is simply not ours to delete.
+        if !central_present(it) {
+            match (record.get(&it.rel), it.target.is_file()) {
+                (Some(_), true) => {}
+                (None, true) => {
+                    warn!("{} is claimed by adopt.rules but the central repo holds no copy of it -> run `cfgsync harvest` to adopt it", it.rel);
+                    continue;
+                }
+                (_, false) => continue,
             }
+            println!(
+                "{}",
+                ui::row(width, &it.rel, "<= gone from the central repo, deleted here")
+            );
+            deleted += 1;
+            if !dry {
+                if let Err(e) = std::fs::remove_file(&it.target) {
+                    warn!("cannot remove {}: {e}", it.rel);
+                }
+                drop_empty_parents(&it.target, &repo.source);
+            }
+            continue;
+        }
+        let Some(ad) = it.ad else {
             let want = std::fs::read(&it.copy).unwrap_or_default();
             let have = std::fs::read(&it.target).unwrap_or_default();
             let present = it.target.is_file();
@@ -550,8 +721,8 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
                 kept += 1;
                 continue;
             }
-            if !force && recorded.is_none() && present && !have.is_empty() {
-                warn!("{} differs from share/{} and there is no harvest record -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it", it.rel, it.rel);
+            if !force && record.get(&it.rel).is_none() && present && !have.is_empty() {
+                warn!("{} differs from share/{} and this machine never synced it -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it", it.rel, it.rel);
                 blocked = true;
                 continue;
             }
@@ -583,7 +754,7 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
                 kept += 1;
                 continue;
             }
-            if !force && recorded.is_none() && !actual.trim().is_empty() {
+            if !force && record.get(&it.rel).is_none() && !actual.trim().is_empty() {
                 warn!(
                     "{} cannot be split by the .{} adapter and differs from {} -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it",
                     it.rel,
@@ -636,9 +807,9 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
         // we never wrote this file and it holds something the central repo does
         // not: a hand edit and a stale copy look identical, and throwing either
         // away is the user's call
-        if !force && recorded.is_none() && !actual.trim().is_empty() {
+        if !force && record.get(&it.rel).is_none() && !actual.trim().is_empty() {
             warn!(
-                "{} differs from what base + overlay would write and there is no harvest record -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it",
+                "{} differs from what base + overlay would write and this machine never synced it -> left alone; run `cfgsync harvest` to keep it, or `cfgsync render --force` to overwrite it",
                 it.rel
             );
             blocked = true;
@@ -653,17 +824,21 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     if dry {
         say!(
             "render",
-            "{}: {}, {} unchanged",
+            "{}: {}{}, {} unchanged",
             ui::dim(&repo.source.display().to_string()),
             ui::warn(&format!("{written} to write")),
+            match deleted {
+                0 => String::new(),
+                n => format!(", {n} to delete"),
+            },
             kept
         );
         return 0;
     }
     if !blocked {
-        central::write_hash(&repo.dir, content_hash(&items));
+        Record::save(&repo.dir, &snapshot(&items, &record));
     }
-    if written > 0 {
+    if written > 0 || deleted > 0 {
         match central::commit_all(&repo.source, "cfgsync: render") {
             Ok(true) => say!("render", "{}", ui::ok("committed in the source repo")),
             Ok(false) => {}
@@ -672,9 +847,13 @@ pub fn render(repo: &Repo, os: &str, dry: bool, force: bool) -> i32 {
     }
     say!(
         "render",
-        "{}: {}, {} unchanged",
+        "{}: {}{}, {} unchanged",
         ui::dim(&repo.source.display().to_string()),
         ui::ok(&format!("{written} written")),
+        match deleted {
+            0 => String::new(),
+            n => format!(", {n} deleted"),
+        },
         kept
     );
     0
@@ -742,10 +921,40 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
     warn_unmanaged(repo);
     let items = discover(repo, os);
     let width = ui::width(items.iter().map(|it| it.rel.as_str()));
+    let record = Record::load(&repo.dir);
     let mut harvested = 0usize;
     let mut adopted = 0usize;
+    let mut deleted = 0usize;
     let mut unchanged = 0usize;
+    let mut blocked = false;
     for it in &items {
+        // the source file is gone while a central copy is still here: the
+        // deletion propagates, provided the record proves this machine had the
+        // file and the central side has not moved since
+        if !it.target.is_file() && central_any(it) {
+            if let Some(seen) = record.get(&it.rel) {
+                match central_digest(it) {
+                    Some(central) if central != seen.central => {
+                        warn!(
+                            "{} is gone from the source repo but the central copy changed since the last sync -> left alone (`cfgsync render` restores it)",
+                            it.rel
+                        );
+                        blocked = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+                println!(
+                    "{}",
+                    ui::row(width, &it.rel, "deleted -> dropped from the central repo")
+                );
+                deleted += 1;
+                if !prune_central(repo, it, dry) {
+                    blocked = true;
+                }
+                continue;
+            }
+        }
         let Some(ad) = it.ad else {
             let (changed, newly) = harvest_shared(repo, it, dry);
             match changed {
@@ -824,7 +1033,9 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
         let p = plan(&pats, it, ad, os, &current, adopting);
         let overlay_same = match &p.overlay {
             Some(text) => *text == read(&it.overlay),
-            None => !it.overlay.is_file(),
+            // no owned key left: same as having no overlay file, or one that
+            // holds nothing but the generated header
+            None => !it.overlay.is_file() || ad.overlay_ops(&read(&it.overlay)).is_empty(),
         };
         let same = !adopting && p.base.is_none() && overlay_same && p.target == current;
         if same {
@@ -868,8 +1079,17 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
         if let Some(base) = &p.base {
             write(&it.base, base);
         }
-        if let Some(overlay) = &p.overlay {
-            write(&it.overlay, overlay);
+        match &p.overlay {
+            Some(overlay) => write(&it.overlay, overlay),
+            // the last machine-owned key is gone: so is the overlay file
+            None if it.overlay.is_file() => {
+                if let Err(e) = std::fs::remove_file(&it.overlay) {
+                    warn!("cannot remove {}: {e}", central_rel(repo, &it.overlay));
+                } else {
+                    drop_empty_parents(&it.overlay, &repo.dir);
+                }
+            }
+            None => {}
         }
         if p.target != current {
             write(&it.target, &p.target);
@@ -878,27 +1098,45 @@ pub fn harvest(repo: &Repo, os: &str, dry: bool) -> i32 {
     if dry {
         say!(
             "harvest",
-            "{}: {}, {} unchanged",
+            "{}: {}{}, {} unchanged",
             ui::dim(&repo.source.display().to_string()),
             ui::warn(&format!("{harvested} to harvest")),
+            match deleted {
+                0 => String::new(),
+                n => format!(", {n} to delete"),
+            },
             unchanged
         );
         return 0;
     }
-    central::write_hash(&repo.dir, content_hash(&items));
+    if !blocked {
+        Record::save(&repo.dir, &snapshot(&items, &record));
+    }
     match central::commit_all(&repo.source, "cfgsync: harvest") {
         Ok(true) => say!("harvest", "{}", ui::ok("committed in the source repo")),
         Ok(false) => {}
         Err(e) => warn!("could not commit the source repo: {e}"),
     }
+    let mut parts: Vec<String> = Vec::new();
+    if harvested > 0 {
+        parts.push(match harvested {
+            1 => format!("{} harvested ({adopted} adopted)", ui::ok("1")),
+            n => format!("{n} harvested ({adopted} adopted)"),
+        });
+    }
+    if deleted > 0 {
+        parts.push(match deleted {
+            1 => format!("{} deleted", ui::ok("1")),
+            n => format!("{n} deleted"),
+        });
+    }
     say!(
         "harvest",
         "{}: {}",
         ui::dim(&repo.source.display().to_string()),
-        match harvested {
-            0 => ui::ok("no changes"),
-            1 => format!("{} harvested ({adopted} adopted), {unchanged} unchanged", ui::ok("1")),
-            n => format!("{n} harvested ({adopted} adopted), {unchanged} unchanged"),
+        match parts.is_empty() {
+            true => ui::ok("no changes"),
+            false => format!("{}, {unchanged} unchanged", parts.join(", ")),
         }
     );
     0
@@ -911,8 +1149,22 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
     let items = discover(repo, os);
     let width = ui::width(items.iter().map(|it| it.rel.as_str()));
     let pats = rules::load(&repo.sync_rules());
+    let record = Record::load(&repo.dir);
     let mut changed = 0usize;
     for it in &items {
+        let seen = record.get(&it.rel);
+        // one side of a file the record still holds is gone: that is a deletion
+        // on its way through, not a file that was never synced here
+        if seen.is_some() && !central_present(it) && it.target.is_file() {
+            row('-', width, &it.rel, "gone from the central repo -- `cfgsync render` deletes it here");
+            changed += 1;
+            continue;
+        }
+        if seen.is_some() && !it.target.is_file() && central_any(it) {
+            row('-', width, &it.rel, "deleted here -- `cfgsync harvest` drops it from the central repo");
+            changed += 1;
+            continue;
+        }
         let Some(ad) = it.ad else {
             if !it.copy.is_file() {
                 row('?', width, &it.rel, "claimed by adopt.rules, no share copy yet -- `cfgsync harvest` adopts it");
@@ -974,14 +1226,12 @@ pub fn status(repo: &Repo, os: &str) -> i32 {
             changed += 1;
         }
     }
-    if let Some(recorded) = central::read_hash(&repo.dir) {
-        if recorded != content_hash(&items) {
-            println!(
-                "{}   {}",
-                ui::tag("status"),
-                ui::warn("render would refuse: content changed since the last harvest -> `cfgsync harvest`")
-            );
-        }
+    if !record.is_empty() && record.differs(&items) {
+        println!(
+            "{}   {}",
+            ui::tag("status"),
+            ui::warn("render would refuse: content changed since the last harvest -> `cfgsync harvest`")
+        );
     }
     match changed {
         0 => say!("status", "{}", ui::ok("clean")),
@@ -995,6 +1245,7 @@ fn row(code: char, width: usize, rel_path: &str, detail: &str) {
     let code = match code {
         'M' => ui::warn(&code.to_string()),
         '+' => ui::ok(&code.to_string()),
+        '-' => ui::warn(&code.to_string()),
         _ => ui::bad(&code.to_string()),
     };
     println!(
@@ -1261,9 +1512,32 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_target_does_not_change_the_hash() {
+    fn nothing_on_disk_records_nothing() {
         let items = vec![item_at("a.json"), item_at("b.json")];
-        let h = content_hash(&items);
-        assert_eq!(h, content_hash(&items));
+        assert!(snapshot(&items, &Record::default()).is_empty());
+    }
+
+    #[test]
+    fn the_record_round_trips_and_a_total_hash_reads_as_no_record() {
+        let dir = std::env::temp_dir().join(format!("cfgsync-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut record = Record::default();
+        record.map.insert(
+            "a.json".to_string(),
+            Seen {
+                source: 1,
+                central: 2,
+            },
+        );
+        Record::save(&dir, &record);
+        let seen = Record::load(&dir).get("a.json").unwrap();
+        assert_eq!((seen.source, seen.central), (1, 2));
+        // the old one-number format cannot say which file moved, so it reads as
+        // an empty record: an upgraded machine deletes nothing on the strength
+        // of it, and the next harvest writes the per-file form
+        write(&dir.join(central::HASH_FILE), "0123456789abcdef\n");
+        assert!(Record::load(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

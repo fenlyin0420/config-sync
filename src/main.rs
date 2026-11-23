@@ -56,6 +56,13 @@ usage:
 
 harvest / render / status work on the source repo the current directory is in,
 or on NAME|DIR; -a does it for every source repo this platform has a path for.
+
+harvest and render propagate deletions, down to one line: a key removed here
+leaves the base or the overlay, a file removed here leaves the central repo, and
+a base or overlay removed there takes the file here with it. Each deletion is
+decided per file against <name>/.hash, and only when that file's other side has
+not changed since the last harvest/render -- a file this machine never synced is
+never deleted.
 edit -a opens adopt.rules (which files), -s sync.rules (which keys), -p
 path.rules (where the app lives on each platform).
 
@@ -89,7 +96,7 @@ layout of one source repo inside the central repo:
   <name>/sync.rules                      which keys are machine-owned
   <name>/base/<stem>.base.<ext>          shared baseline
   <name>/platform/<os>/<stem>.overlay.<ext>   this machine's delta
-  <name>/.hash                           content hash at the last harvest/render
+  <name>/.hash                           both sides of every file, last harvest/render
 
 platform resolution (first hit wins):
   --os NAME > CFGSYNC_OS > <central>/.os (written by init) > host

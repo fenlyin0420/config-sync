@@ -313,15 +313,6 @@ pub fn by_name(root: &Path, name: &str) -> Option<Entry> {
 
 // ---------------------------------------------------------------- state
 
-pub fn read_hash(dir: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(dir.join(HASH_FILE)).ok()?;
-    u64::from_str_radix(text.trim(), 16).ok()
-}
-
-pub fn write_hash(dir: &Path, hash: u64) {
-    write(&dir.join(HASH_FILE), &format!("{hash:016x}\n"));
-}
-
 pub fn read_os(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(OS_FILE)).ok()?;
     match text.trim() {
