@@ -36,8 +36,18 @@ fn edit_works_from_a_subdirectory_of_the_source_repo() {
 fn edit_opens_the_rules_of_the_directory_it_was_started_in() {
     // `-a` means adopt.rules here, never "every source repo"
     let f = Fixture::new("edit-cwd");
-    f.write("aaa/config.ini", "[core]\neditor = vim\n")
-        .write("zzz/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "aaa/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    )
+    .write(
+        "zzz/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok(&["init"]);
     f.ok(&["add", "aaa"]);
     f.ok(&["add", "zzz"]);

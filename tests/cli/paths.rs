@@ -5,7 +5,12 @@ use crate::support::*;
 #[test]
 fn add_records_the_platform_path_in_path_rules() {
     let f = Fixture::new("add-path");
-    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok(&["init"]);
     let out = f.ok(&["add", "app"]);
     let repo = f.repo("app");
@@ -94,7 +99,9 @@ fn a_directory_without_path_rules_is_reported_not_used() {
     let f = workspace("old-layout");
     f.write(
         "central/legacy/base/config.base.ini",
-        "[core]\neditor = vim\n",
+        r#"[core]
+editor = vim
+"#,
     );
     let out = f.run_in("", &["status", "-a", "-v"]);
     let err = String::from_utf8_lossy(&out.stderr);

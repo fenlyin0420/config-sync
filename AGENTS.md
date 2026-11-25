@@ -263,6 +263,10 @@ Data flow, both directions:
   usage or I/O errors. `--help` / `--version` print to stdout and exit `0`.
 - `--dry-run` must print the same plan without writing anything, including the
   `.hash` file and any commit.
+- Test fixtures write file content as a multi-line raw string (`r#"[core]` with
+  the lines flush left, the closing `"#` on its own line after the final
+  newline), never `\n` escapes: the test then reads like the file it writes. A
+  one-line document keeps a normal string (`"config.ini\n"`).
 - Replies and docs follow the language of the surrounding code (English);
   `sync.rules`' generated template comments are Chinese, matching the file users
   actually read.

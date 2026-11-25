@@ -5,7 +5,12 @@ use crate::support::*;
 #[test]
 fn add_registers_a_directory_and_git_inits_it() {
     let f = Fixture::new("add");
-    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok(&["init"]);
     let out = f.ok(&["add", "app"]);
     let repo = f.repo("app");
@@ -24,7 +29,12 @@ fn add_registers_a_directory_and_git_inits_it() {
 #[test]
 fn add_refuses_a_file_and_a_missing_directory() {
     let f = Fixture::new("add-refuse");
-    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok(&["init"]);
     let out = f.run(&["add", "app/config.ini"]);
     assert_eq!(out.status.code(), Some(2));
@@ -39,7 +49,12 @@ fn add_refuses_a_file_and_a_missing_directory() {
 #[test]
 fn add_needs_a_central_repo() {
     let f = Fixture::new("add-no-init");
-    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     let out = f.run(&["add", "app"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cfgsync init"));
@@ -48,9 +63,24 @@ fn add_needs_a_central_repo() {
 #[test]
 fn add_takes_a_custom_name_and_suffixes_a_taken_one() {
     let f = Fixture::new("add-name");
-    f.write("one/app/config.ini", "[core]\neditor = vim\n")
-        .write("two/app/config.ini", "[core]\neditor = vi\n")
-        .write("three/other/config.ini", "[core]\neditor = nano\n");
+    f.write(
+        "one/app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    )
+    .write(
+        "two/app/config.ini",
+        r#"[core]
+editor = vi
+"#,
+    )
+    .write(
+        "three/other/config.ini",
+        r#"[core]
+editor = nano
+"#,
+    );
     f.ok(&["init"]);
     f.ok_in("", &["add", "one/app", "nvim"]);
     assert!(f.exists("central/nvim/path.rules"));
@@ -65,7 +95,12 @@ fn add_takes_a_custom_name_and_suffixes_a_taken_one() {
 #[test]
 fn adding_the_same_directory_twice_keeps_one_central_repo() {
     let f = Fixture::new("add-twice");
-    f.write("app/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
     let out = f.ok_in("", &["add", "app", "other"]);

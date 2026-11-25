@@ -8,13 +8,24 @@ fn init_creates_the_central_repo_once() {
     let out = f.ok(&["init"]);
     assert!(out.contains("[init] central repo"), "{out}");
     assert!(f.git("central", &["rev-parse", "--git-dir"]).contains(".git"));
-    assert_eq!(f.read("central/.gitignore"), ".hash\n.os\n");
+    assert_eq!(
+        f.read("central/.gitignore"),
+        r#".hash
+.os
+"#
+    );
     assert!(!f.read("central/.os").trim().is_empty());
 
     // second run is a no-op, not an error
     let again = f.ok(&["init"]);
     assert!(again.contains("central repo"), "{again}");
-    assert_eq!(f.read("central/.gitignore"), ".hash\n.os\n", "idempotent");
+    assert_eq!(
+        f.read("central/.gitignore"),
+        r#".hash
+.os
+"#,
+        "idempotent"
+    );
 }
 
 #[test]

@@ -141,21 +141,39 @@ pub fn workspace(name: &str) -> Fixture {
     let mut f = Fixture::new(name);
     f.write(
         "app/config.ini",
-        "[core]\neditor = vim\ntheme = dark\n\n[limits]\ntimeout = 45\n",
+        r#"[core]
+editor = vim
+theme = dark
+
+[limits]
+timeout = 45
+"#,
     )
     .write(
         "app/settings.json",
-        "{\n  \"theme\": \"dark\",\n  \"packages\": [\"npm:a\"],\n  \"tools\": [\"+codemode\"]\n}\n",
+        r#"{
+  "theme": "dark",
+  "packages": ["npm:a"],
+  "tools": ["+codemode"]
+}
+"#,
     );
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
     f.write(
         &format!("{}/adopt.rules", f.repo("app")),
-        "config.ini\nsettings.json\n",
+        r#"config.ini
+settings.json
+"#,
     )
     .write(
         &format!("{}/sync.rules", f.repo("app")),
-        "# machine owned\n[platform]\ncore.*\ntheme\ntools\n",
+        r#"# machine owned
+[platform]
+core.*
+theme
+tools
+"#,
     );
     f.cwd = "app".to_string();
     f

@@ -82,7 +82,15 @@ fn a_removed_line_leaves_the_base_and_then_the_file() {
     let repo = f.repo("app");
     f.ok(&["harvest"]);
     // a shared key this machine drops: the base drops the line with it
-    f.write("app/config.ini", "[core]\neditor = vim\ntheme = dark\n\n[limits]\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+theme = dark
+
+[limits]
+"#,
+    );
     f.ok(&["harvest"]);
     let base = f.read(&format!("{repo}/base/config.base.ini"));
     assert!(!base.contains("timeout"), "{base}");
@@ -90,13 +98,22 @@ fn a_removed_line_leaves_the_base_and_then_the_file() {
     // a shared line deleted in the central repo leaves the file
     f.write(
         &format!("{repo}/base/config.base.ini"),
-        "[core]\neditor = vim\ntheme = dark\n\n[limits]\nretries = 3\n",
+        r#"[core]
+editor = vim
+theme = dark
+
+[limits]
+retries = 3
+"#,
     );
     f.ok(&["render"]);
     assert!(f.read("app/config.ini").contains("retries = 3"));
     f.write(
         &format!("{repo}/base/config.base.ini"),
-        "[core]\neditor = vim\ntheme = dark\n",
+        r#"[core]
+editor = vim
+theme = dark
+"#,
     );
     f.ok(&["render"]);
     assert!(

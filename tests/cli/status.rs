@@ -10,8 +10,25 @@ fn status_reports_changed_files_then_goes_clean() {
     let clean = f.ok(&["status"]);
     assert!(clean.contains("[status] clean"), "{clean}");
 
-    f.write("app/config.ini", "[core]\neditor = nano\ntheme = dark\n\n[limits]\ntimeout = 45\n");
-    f.write("app/settings.json", "{\n  \"theme\": \"light\",\n  \"packages\": [\"npm:a\"],\n  \"tools\": [\"+codemode\"]\n}\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = nano
+theme = dark
+
+[limits]
+timeout = 45
+"#,
+    );
+    f.write(
+        "app/settings.json",
+        r#"{
+  "theme": "light",
+  "packages": ["npm:a"],
+  "tools": ["+codemode"]
+}
+"#,
+    );
     let dirty = f.ok(&["status"]);
     assert!(dirty.contains("M  config.ini"), "{dirty}");
     assert!(dirty.contains("M  settings.json"), "{dirty}");
@@ -23,8 +40,19 @@ fn status_reports_changed_files_then_goes_clean() {
 fn status_reports_a_file_that_is_not_on_disk() {
     let f = workspace("status-missing");
     let repo = f.repo("app");
-    f.write(&format!("{repo}/base/gone.base.ini"), "[core]\neditor = vim\n");
-    f.write(&format!("{repo}/adopt.rules"), "config.ini\nsettings.json\ngone.ini\n");
+    f.write(
+        &format!("{repo}/base/gone.base.ini"),
+        r#"[core]
+editor = vim
+"#,
+    );
+    f.write(
+        &format!("{repo}/adopt.rules"),
+        r#"config.ini
+settings.json
+gone.ini
+"#,
+    );
     let out = f.ok(&["status"]);
     assert!(out.contains("+  gone.ini"), "{out}");
 }

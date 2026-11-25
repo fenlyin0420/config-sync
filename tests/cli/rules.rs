@@ -11,11 +11,22 @@ fn rules_are_authoritative_in_both_directions() {
     // an overlay entry sync.rules does not own is drift: it goes back to base
     f.write(
         &format!("{repo}/platform/{os}/config.overlay.ini"),
-        "[core]\neditor = code\n\n[limits]\nnotowned = 1\n",
+        r#"[core]
+editor = code
+
+[limits]
+notowned = 1
+"#,
     );
     f.write(
         "app/config.ini",
-        "[core]\neditor = code\n\n[limits]\nnotowned = 1\ntimeout = 45\n",
+        r#"[core]
+editor = code
+
+[limits]
+notowned = 1
+timeout = 45
+"#,
     );
     f.ok(&["harvest"]);
     assert!(
@@ -41,11 +52,19 @@ fn a_rule_can_scope_itself_to_one_nested_file() {
     let f = Fixture::new("rule-path");
     f.write(
         "app/settings.json",
-        "{\n  \"theme\": \"dark\",\n  \"defaultTools\": [\"a\"]\n}\n",
+        r#"{
+  "theme": "dark",
+  "defaultTools": ["a"]
+}
+"#,
     )
     .write(
         "app/agent/settings.json",
-        "{\n  \"theme\": \"dark\",\n  \"defaultTools\": [\"a\"]\n}\n",
+        r#"{
+  "theme": "dark",
+  "defaultTools": ["a"]
+}
+"#,
     );
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -82,10 +101,17 @@ fn a_rule_can_scope_itself_to_one_nested_file() {
 #[test]
 fn a_bang_line_keeps_a_key_out_of_the_central_repo() {
     let f = Fixture::new("veto");
-    let secret = "\"apiKey\": \"sk-local-123\",\n";
+    let secret = r#""apiKey": "sk-local-123",
+"#;
     f.write(
         "app/agent/settings.json",
-        &format!("{{\n  \"theme\": \"solarized\",\n  {secret}  \"packages\": [\"npm:a\"]\n}}\n"),
+        &format!(
+            r#"{{
+  "theme": "solarized",
+  {secret}  "packages": ["npm:a"]
+}}
+"#
+        ),
     );
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -94,7 +120,9 @@ fn a_bang_line_keeps_a_key_out_of_the_central_repo() {
     f.write(&format!("{repo}/adopt.rules"), "agent/settings.json\n")
         .write(
             &format!("{repo}/sync.rules"),
-            "/agent/settings.json:theme\n!/agent/settings.json:apiKey\n",
+            r#"/agent/settings.json:theme
+!/agent/settings.json:apiKey
+"#,
         );
     f.ok_in("app", &["harvest"]);
 
@@ -120,7 +148,13 @@ fn a_bang_line_keeps_a_key_out_of_the_central_repo() {
     // a central repo that already committed the key loses it on the next harvest
     f.write(
         &format!("{repo}/base/agent/settings.base.json"),
-        &format!("{{\n  \"theme\": \"solarized\",\n  {secret}  \"packages\": []\n}}\n"),
+        &format!(
+            r#"{{
+  "theme": "solarized",
+  {secret}  "packages": []
+}}
+"#
+        ),
     );
     let out = f.ok_in("app", &["harvest"]);
     assert!(out.contains("keep : apiKey"), "{out}");
@@ -132,7 +166,13 @@ fn a_bang_line_keeps_a_key_out_of_the_central_repo() {
 #[test]
 fn no_overlay_file_is_created_while_nothing_is_machine_owned() {
     let f = Fixture::new("no-overlay");
-    f.write("app/config.ini", "[core]\neditor = vim\ntheme = dark\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = vim
+theme = dark
+"#,
+    );
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
     let repo = f.repo("app");

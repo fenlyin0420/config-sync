@@ -64,7 +64,10 @@ fn pull_brings_a_remote_change_into_the_central_repo() {
         .unwrap();
     std::fs::write(
         repo_dir.path().join("base/settings.base.json"),
-        "{\n  \"theme\": \"light\"\n}\n",
+        r#"{
+  "theme": "light"
+}
+"#,
     )
     .unwrap();
     for args in [

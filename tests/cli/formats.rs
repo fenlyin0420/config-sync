@@ -21,7 +21,14 @@ fn adaptor_lists_every_supported_file_style() {
 #[test]
 fn a_yaml_config_is_split_by_key() {
     let f = Fixture::new("yaml");
-    let doc = "# app\nui:\n  theme: dark\n  padding: 2\n\ndb:\n  host: local\n";
+    let doc = r#"# app
+ui:
+  theme: dark
+  padding: 2
+
+db:
+  host: local
+"#;
     f.write("app/config.yaml", doc);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -61,7 +68,13 @@ fn a_yaml_config_is_split_by_key() {
 #[test]
 fn a_toml_config_is_split_by_key() {
     let f = Fixture::new("toml");
-    let doc = "# app\ntitle = \"app\"\n\n[window]\nsize = 2\nopacity = 1.0\n";
+    let doc = r#"# app
+title = "app"
+
+[window]
+size = 2
+opacity = 1.0
+"#;
     f.write("app/config.toml", doc);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -95,7 +108,9 @@ fn a_toml_config_is_split_by_key() {
 #[test]
 fn a_jsonl_config_is_split_by_record() {
     let f = Fixture::new("jsonl");
-    let doc = "{\"model\": \"a\", \"temp\": 1}\n{\"model\": \"b\", \"temp\": 2}\n";
+    let doc = r#"{"model": "a", "temp": 1}
+{"model": "b", "temp": 2}
+"#;
     f.write("app/app.jsonl", doc);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -112,7 +127,9 @@ fn a_jsonl_config_is_split_by_record() {
     // the first record is shared, the second machine-owned
     f.write(
         "app/app.jsonl",
-        "{\"model\": \"z\", \"temp\": 1}\n{\"model\": \"b\", \"temp\": 2}\n",
+        r#"{"model": "z", "temp": 1}
+{"model": "b", "temp": 2}
+"#,
     );
     f.ok_in("app", &["harvest"]);
     let base = f.read(&format!("{repo}/base/app.base.jsonl"));
@@ -128,7 +145,11 @@ fn a_jsonl_config_is_split_by_record() {
 #[test]
 fn an_extensionless_config_is_split_by_key() {
     let f = Fixture::new("plain");
-    let ghostty = "# ghostty\ntheme = catppuccin-mocha\nkeybind = ctrl+a=text:a\nkeybind = ctrl+b=text:b\n";
+    let ghostty = r#"# ghostty
+theme = catppuccin-mocha
+keybind = ctrl+a=text:a
+keybind = ctrl+b=text:b
+"#;
     f.write("app/config", ghostty);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -151,7 +172,11 @@ fn an_extensionless_config_is_split_by_key() {
     assert_eq!(f.read("app/config"), ghostty);
     f.write(
         "app/config",
-        "# ghostty\ntheme = dracula\nkeybind = ctrl+a=text:a\nkeybind = ctrl+b=text:b\n",
+        r#"# ghostty
+theme = dracula
+keybind = ctrl+a=text:a
+keybind = ctrl+b=text:b
+"#,
     );
     f.ok_in("app", &["harvest"]);
     assert!(
@@ -167,7 +192,13 @@ fn a_file_the_adapter_cannot_read_is_carried_whole() {
     // rime's `*.dict.yaml` is `.yaml` by name and tab separated in practice:
     // the adapter must not freeze it, it has to reach every machine anyway
     let f = Fixture::new("carried-whole");
-    let dict = "---\nname: demo\nversion: \"1\"\n...\n\n\u{4f60}\tni\t1\n";
+    let dict = r#"---
+name: demo
+version: "1"
+...
+
+你	ni	1
+"#;
     f.write("app/demo.dict.yaml", dict);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);
@@ -187,7 +218,15 @@ fn a_file_the_adapter_cannot_read_is_carried_whole() {
     assert_eq!(f.read("app/demo.dict.yaml"), dict);
 
     // and an edit on this machine goes back into the base whole
-    f.write("app/demo.dict.yaml", "---\nname: demo\n...\n\n\u{4f60}\tni\t2\n");
+    f.write(
+        "app/demo.dict.yaml",
+        r#"---
+name: demo
+...
+
+你	ni	2
+"#,
+    );
     let out = f.ok_in("app", &["harvest"]);
     assert!(out.contains("carried whole"), "{out}");
     assert!(f
@@ -198,7 +237,9 @@ fn a_file_the_adapter_cannot_read_is_carried_whole() {
 #[test]
 fn a_file_with_no_adapter_is_carried_whole_in_share() {
     let f = Fixture::new("share");
-    let lua = "vim.opt.number = true\nvim.g.mapleader = ' '\n";
+    let lua = r#"vim.opt.number = true
+vim.g.mapleader = ' '
+"#;
     f.write("app/lua/keymaps.lua", lua);
     f.ok(&["init"]);
     f.ok(&["add", "app"]);

@@ -13,17 +13,25 @@ fn render_writes_base_plus_overlay_into_an_empty_source_repo() {
     f.write(&format!("{repo}/adopt.rules"), "config.ini\n")
         .write(
             &format!("{repo}/base/config.base.ini"),
-            "[core]\neditor = vim\ntheme = dark\n",
+            r#"[core]
+editor = vim
+theme = dark
+"#,
         )
         .write(
             &format!("{repo}/platform/{os}/config.overlay.ini"),
-            "[core]\ntheme = solarized\n",
+            r#"[core]
+theme = solarized
+"#,
         );
     let out = f.ok_in("app", &["render"]);
     assert!(out.contains("1 written"), "{out}");
     assert_eq!(
         f.read("app/config.ini"),
-        "[core]\neditor = vim\ntheme = solarized\n"
+        r#"[core]
+editor = vim
+theme = solarized
+"#
     );
     assert_eq!(f.last_commit("app"), "cfgsync: render");
 }
@@ -43,7 +51,16 @@ fn render_is_idempotent_and_commits_nothing_twice() {
 fn render_refuses_after_an_unharvested_edit() {
     let f = workspace("render-guard");
     f.ok(&["harvest"]);
-    f.write("app/config.ini", "[core]\neditor = nano\ntheme = dark\n\n[limits]\ntimeout = 45\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = nano
+theme = dark
+
+[limits]
+timeout = 45
+"#,
+    );
     let out = f.run(&["render"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -58,7 +75,16 @@ fn render_refuses_after_an_unharvested_edit() {
 fn render_force_overwrites_the_unharvested_edit() {
     let f = workspace("render-force");
     f.ok(&["harvest"]);
-    f.write("app/config.ini", "[core]\neditor = nano\ntheme = dark\n\n[limits]\ntimeout = 45\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = nano
+theme = dark
+
+[limits]
+timeout = 45
+"#,
+    );
     f.ok(&["render", "--force"]);
     assert!(f.read("app/config.ini").contains("vim"), "forced back to base + overlay");
 }
@@ -67,12 +93,19 @@ fn render_force_overwrites_the_unharvested_edit() {
 fn render_leaves_a_file_it_never_wrote_alone() {
     let f = Fixture::new("render-no-record");
     f.ok(&["init"]);
-    f.write("app/config.ini", "[core]\neditor = nano\n");
+    f.write(
+        "app/config.ini",
+        r#"[core]
+editor = nano
+"#,
+    );
     f.ok(&["add", "app"]);
     let repo = f.repo("app");
     f.write(&format!("{repo}/adopt.rules"), "config.ini\n").write(
         &format!("{repo}/base/config.base.ini"),
-        "[core]\neditor = vim\n",
+        r#"[core]
+editor = vim
+"#,
     );
     let out = f.run_in("app", &["render", "-v"]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -89,12 +122,27 @@ fn render_writes_a_pulled_base_for_a_file_this_machine_never_had() {
     // a base arrives from another machine for a file that does not exist here
     f.write(
         &format!("{repo}/base/extra.base.json"),
-        "{\n  \"theme\": \"dark\"\n}\n",
+        r#"{
+  "theme": "dark"
+}
+"#,
     );
-    f.write(&format!("{repo}/adopt.rules"), "config.ini\nsettings.json\nextra.json\n");
+    f.write(
+        &format!("{repo}/adopt.rules"),
+        r#"config.ini
+settings.json
+extra.json
+"#,
+    );
     let out = f.ok(&["render"]);
     assert!(out.contains("extra.json"), "{out}");
-    assert_eq!(f.read("app/extra.json"), "{\n  \"theme\": \"dark\"\n}\n");
+    assert_eq!(
+        f.read("app/extra.json"),
+        r#"{
+  "theme": "dark"
+}
+"#
+    );
 }
 
 #[test]
@@ -107,15 +155,24 @@ fn the_platform_overlay_is_selected_by_os() {
     let os = f.read("central/.os").trim().to_string();
     f.write(
         &format!("{repo}/path.rules"),
-        &format!("{os} = {app}\nwin = {app}\nplan9 = {app}\n"),
+        &format!(
+            r#"{os} = {app}
+win = {app}
+plan9 = {app}
+"#
+        ),
     );
     f.write(
         &format!("{repo}/base/config.base.ini"),
-        "[core]\neditor = vim\n",
+        r#"[core]
+editor = vim
+"#,
     )
     .write(
         &format!("{repo}/platform/win/config.overlay.ini"),
-        "[core]\neditor = code\n",
+        r#"[core]
+editor = code
+"#,
     );
     // a fresh machine: nothing harvested here yet, so the files are written
     std::fs::remove_file(f.root.join("app/config.ini")).unwrap();
@@ -138,7 +195,13 @@ fn render_accepts_a_pulled_base_while_the_source_is_untouched() {
     // a base edit arrives from another machine; nothing here was edited
     f.write(
         &format!("{repo}/base/config.base.ini"),
-        "[core]\neditor = vim\ntheme = dark\n\n[limits]\ntimeout = 90\n",
+        r#"[core]
+editor = vim
+theme = dark
+
+[limits]
+timeout = 90
+"#,
     );
     let out = f.ok(&["render"]);
     assert!(out.contains("config.ini"), "{out}");

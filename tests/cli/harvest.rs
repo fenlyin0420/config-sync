@@ -13,7 +13,13 @@ fn harvest_adopts_and_routes_owned_keys_to_the_overlay() {
     // the base is the file byte for byte, so comments and order survive
     assert_eq!(
         f.read(&format!("{repo}/base/config.base.ini")),
-        "[core]\neditor = vim\ntheme = dark\n\n[limits]\ntimeout = 45\n"
+        r#"[core]
+editor = vim
+theme = dark
+
+[limits]
+timeout = 45
+"#
     );
     let overlay = f.read(&format!("{repo}/platform/{os}/config.overlay.ini"));
     assert!(overlay.contains("editor = vim"), "{overlay}");
@@ -35,7 +41,9 @@ fn harvest_pins_an_owned_key_that_still_equals_base() {
         .contains("timeout"));
     f.write(
         &format!("{repo}/sync.rules"),
-        "core.*\nlimits.timeout\n",
+        r#"core.*
+limits.timeout
+"#,
     );
     f.ok(&["harvest"]);
     let overlay = f.read(&format!("{repo}/platform/{os}/config.overlay.ini"));
@@ -78,7 +86,12 @@ fn harvest_refuses_to_run_outside_a_managed_repo() {
 #[test]
 fn harvest_all_covers_every_source_repo() {
     let f = workspace("harvest-all");
-    f.write("tool/config.ini", "[core]\neditor = vim\n");
+    f.write(
+        "tool/config.ini",
+        r#"[core]
+editor = vim
+"#,
+    );
     f.ok_in("", &["add", "tool"]);
     f.write(&format!("{}/adopt.rules", f.repo("tool")), "config.ini\n");
     let out = f.ok(&["harvest", "-a"]);
