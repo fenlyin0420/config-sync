@@ -129,10 +129,50 @@ impl Drop for Fixture {
     }
 }
 
+/// `p` the way the binary prints it: absolute, native separators, and without
+/// the `\\?\` prefix Windows `canonicalize` adds but nothing else ever prints
+pub fn abs_path(p: &std::path::Path) -> String {
+    let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let text = abs.to_string_lossy().into_owned();
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    }
+}
+
+/// `text` with Windows separators folded to `/`, so a path in the output of a
+/// run compares equal to the same path built with `/`
+pub fn slashes(text: &str) -> String {
+    let text = text.replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
+    }
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
+}
+
 /// the absolute path of `rel`, forward slashes, as path.rules stores it
 pub fn source_path(f: &Fixture, rel: &str) -> String {
-    let abs = std::fs::canonicalize(f.root.join(rel)).unwrap();
-    abs.to_string_lossy().replace('\\', "/")
+    slashes(&abs_path(&f.root.join(rel)))
+}
+
+/// the `path.rules` line recorded for this platform in `repo`, with `~`
+/// resolved and `/` separators, so it compares to `source_path`: `add`
+/// collapses the home directory, which a temp directory may sit under
+pub fn recorded_path(f: &Fixture, repo: &str) -> String {
+    let os = f.read("central/.os").trim().to_string();
+    let prefix = format!("{os} = ");
+    let line = f
+        .read(&format!("{repo}/path.rules"))
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(|v| v.trim().to_string()))
+        .unwrap_or_default();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    match line.strip_prefix('~') {
+        Some(rest) => slashes(&format!("{home}{rest}")),
+        None => slashes(&line),
+    }
 }
 
 /// an initialized central repo plus one source repo (`app`) that is added and

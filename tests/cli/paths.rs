@@ -14,32 +14,33 @@ editor = vim
     f.ok(&["init"]);
     let out = f.ok(&["add", "app"]);
     let repo = f.repo("app");
-    let os = f.read("central/.os").trim().to_string();
     let rules = f.read(&format!("{repo}/path.rules"));
     assert!(
-        rules.contains(&format!("{os} = {}", source_path(&f, "app"))),
-        "path.rules should hold this platform's path:\n{rules}"
+        recorded_path(&f, &repo) == source_path(&f, "app"),
+        "path.rules should resolve to this platform's path:\n{rules}"
     );
     assert!(out.contains("path.rules"), "{out}");
 }
 
 #[test]
 fn a_second_machine_adds_its_own_path_to_the_same_repo() {
-    // the same app lives somewhere else on windows: the second machine extends
-    // path.rules instead of creating a second central repo
+    // the same app lives somewhere else on the other platform: that machine
+    // extends path.rules instead of creating a second central repo
     let f = Fixture::new("second-machine");
-    f.write("linux/nvim/init.lua", "vim.o.number = true\n")
-        .write("win/nvim/init.lua", "vim.o.number = true\n");
+    f.write("here/nvim/init.lua", "vim.o.number = true\n")
+        .write("there/nvim/init.lua", "vim.o.number = true\n");
     f.ok(&["init"]);
-    f.ok_in("", &["add", "linux/nvim", "nvim"]);
-    f.ok_in("", &["add", "win/nvim", "nvim", "--os", "win"]);
+    let os = f.read("central/.os").trim().to_string();
+    let other = if os == "win" { "linux" } else { "win" };
+    f.ok_in("", &["add", "here/nvim", "nvim"]);
+    f.ok_in("", &["add", "there/nvim", "nvim", "--os", other]);
     let rules = f.read("central/nvim/path.rules");
-    assert!(rules.contains("linux = "), "{rules}");
-    assert!(rules.contains("win = "), "{rules}");
+    assert!(rules.contains(&format!("{os} = ")), "{rules}");
+    assert!(rules.contains(&format!("{other} = ")), "{rules}");
     assert!(!f.exists("central/nvim-2"), "one repo, two platform paths");
     // and each platform renders its own copy
-    f.ok_in("win/nvim", &["render", "--os", "win"]);
-    assert!(f.read("win/nvim/init.lua").contains("number"));
+    f.ok_in("there/nvim", &["render", "--os", other]);
+    assert!(f.read("there/nvim/init.lua").contains("number"));
 }
 
 #[test]

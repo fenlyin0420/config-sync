@@ -108,6 +108,7 @@ pub fn default_root() -> PathBuf {
     PathBuf::from("cfgsync")
 }
 
+#[cfg(unix)]
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

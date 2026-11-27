@@ -14,7 +14,7 @@ editor = vim
     f.ok(&["init"]);
     let out = f.ok(&["add", "app"]);
     let repo = f.repo("app");
-    assert!(out.contains(&repo), "{out}");
+    assert!(slashes(&out).contains(&repo), "{out}");
     assert!(f.exists(&format!("{repo}/adopt.rules")));
     assert!(f.exists(&format!("{repo}/sync.rules")));
     assert!(f.exists(&format!("{repo}/base")));

@@ -6,8 +6,7 @@ use crate::support::*;
 fn cd_prints_the_central_repo_path() {
     let f = workspace("cd");
     let out = f.ok_in("app", &["cd"]);
-    let central = std::fs::canonicalize(f.central()).unwrap();
-    assert_eq!(out.trim(), central.to_string_lossy().replace('\\', "/"));
+    assert_eq!(out.trim(), abs_path(&f.central()));
 }
 
 #[test]

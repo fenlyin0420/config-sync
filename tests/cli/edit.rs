@@ -53,7 +53,7 @@ editor = vim
     f.ok(&["add", "zzz"]);
     let out = f.ok_in("zzz", &["edit", "-a"]);
     assert!(
-        out.contains(&format!("{}/adopt.rules", f.repo("zzz"))),
+        slashes(&out).contains(&format!("{}/adopt.rules", f.repo("zzz"))),
         "edit opened another repo's rules: {out}"
     );
 }
